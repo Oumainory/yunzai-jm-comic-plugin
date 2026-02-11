@@ -79,10 +79,14 @@ export class ejm extends plugin {
               if(res.status == 200) console.log('状态ok')
               e.reply('文件拉取完成，耐心等待发送吧')
               const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
+              
+              // 修复路径协议：如果是绝对路径，强制添加 file:// 前缀
+              const fileUrl = path.isAbsolute(pdfPath) ? `file://${pdfPath}` : pdfPath;
+              
               if(!e.group){// 检测当前是否为群聊环境
-                 await e.reply(e.friend.sendFile(pdfPath)) 
+                 await e.reply(e.friend.sendFile(fileUrl)) 
               }else{
-                 await e.reply(e.group.fs.upload(pdfPath))
+                 await e.reply(e.group.fs.upload(fileUrl))
 
               }
               return true; 
