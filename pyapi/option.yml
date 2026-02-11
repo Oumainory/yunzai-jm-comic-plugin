@@ -1,0 +1,18 @@
+dir_rule:
+  base_dir: ${JM_BASE_DIR}
+  rule: Bd_Pid
+plugins:
+  after_photo:
+    - plugin: long_img
+      kwargs:
+        img_dir: ${JM_BASE_DIR}/long
+        filename_rule: Pid
+    - plugin: img2pdf
+      kwargs:
+        pdf_dir: ${JM_BASE_DIR}/pdf # pdf存放文件夹
+        filename_rule: Pid # pdf命名规则，P代表photo, id代表使用photo.id也就是章节id
+client:
+  impl: api
+  # 域名自动更新，无需手动配置
+  # retry_times: 请求失败重试次数，默认为5
+  retry_times: 5
