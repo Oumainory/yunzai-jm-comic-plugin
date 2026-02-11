@@ -1,13 +1,17 @@
 //注册nodejs
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 //输出载入消息
 logger.info('尝试载入jmcomic')
 
-
+// 获取当前文件所在目录的绝对路径
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const appsPath = path.join(__dirname, 'apps');
 
 //注册插件
-const files = fs.readdirSync('./plugins/jmcomic-plugin/apps').filter(file => file.endsWith('.js'))
+const files = fs.readdirSync(appsPath).filter(file => file.endsWith('.js'))
 
 let ret = []
 
