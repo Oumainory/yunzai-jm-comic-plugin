@@ -3,8 +3,13 @@
 // import { URL } from 'url';
 // import fs from 'fs/promises';
 import common from "../../../lib/common/common.js";
-import path from 'path'; 
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {exec} from 'child_process';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pluginRoot = path.resolve(__dirname, '..');
+
 const jm = /^#jm查(.*)$/
 const Apirun = /^#jm(启动|重启)api$/
 const Apitimerestart = /^#jm定时检查$/
@@ -73,10 +78,11 @@ export class ejm extends plugin {
             }
               if(res.status == 200) console.log('状态ok')
               e.reply('文件拉取完成，耐心等待发送吧')
+              const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
               if(!e.group){// 检测当前是否为群聊环境
-                 await e.reply(e.friend.sendFile(`././plugins/jmcomic-plugin/resources/pdf/${tup}.pdf`)) 
+                 await e.reply(e.friend.sendFile(pdfPath)) 
               }else{
-                 await e.reply(e.group.fs.upload(`././plugins/jmcomic-plugin/resources/pdf/${tup}.pdf`))
+                 await e.reply(e.group.fs.upload(pdfPath))
 
               }
               return true; 
@@ -106,7 +112,7 @@ export class ejm extends plugin {
           }
 
       async apirun(e){
-        const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
+        const JM_PATH = pluginRoot;
         console.log(`获取工作路径:${JM_PATH}`);
         const PY_PATH = {
           pyapi: path.join(JM_PATH, 'pyapi', 'app.py'),
@@ -142,7 +148,7 @@ export class ejm extends plugin {
           console.error('检查任务出错:', error);
           console.warn('执行重启');
           e.reply('api未启动或意外关闭，执行重启')
-          const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
+          const JM_PATH = pluginRoot;
           console.log(`获取工作路径:${JM_PATH}`);
           const PY_PATH = {
           pyapi: path.join(JM_PATH, 'pyapi', 'app.py'),
@@ -173,7 +179,7 @@ export class ejm extends plugin {
         } catch (error) {
           console.error('检查任务出错:', error);
           console.warn('执行重启');
-          const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
+          const JM_PATH = pluginRoot;
           console.log(`获取工作路径:${JM_PATH}`);
           const PY_PATH = {
           pyapi: path.join(JM_PATH, 'pyapi', 'app.py'),
