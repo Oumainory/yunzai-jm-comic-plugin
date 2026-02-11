@@ -1,18 +1,42 @@
+# 基础配置
 dir_rule:
-  base_dir: ${JM_BASE_DIR}
-  rule: Bd_Pid
+  # 下载基础路径，留空则由 app.py 自动控制（推荐）
+  base_dir: 
+  # 图片下载规则：base_dir/long/album_id/
+  image: long
+  # PDF下载规则：base_dir/pdf/
+  pdf: pdf
+
+# 下载配置
+download:
+  image:
+    # 图片后缀，推荐使用 png 或 jpg
+    suffix: .png
+  
+  # 线程配置
+  threading:
+    # 开启多线程下载
+    enable: true
+    # 线程池大小
+    batch_count: 20
+
+# 插件配置
 plugins:
-  after_photo:
-    - plugin: long_img
-      kwargs:
-        img_dir: ${JM_BASE_DIR}/long
-        filename_rule: Pid
-    - plugin: img2pdf
-      kwargs:
-        pdf_dir: ${JM_BASE_DIR}/pdf # pdf存放文件夹
-        filename_rule: Pid # pdf命名规则，P代表photo, id代表使用photo.id也就是章节id
+  # 必须开启 img2pdf 插件
+  img2pdf:
+    # 插件启用状态
+    enable: true
+    # 插件使用 img2pdf 库（需要在 requirements.txt 中安装）
+    # 如果不指定，默认会尝试使用 reportlab 或其他可用库
+    
+  # 自动重试插件（推荐开启）
+  usage_log:
+    enable: true
+
+# 客户端配置
 client:
-  impl: api
-  # 域名自动更新，无需手动配置
-  # retry_times: 请求失败重试次数，默认为5
-  retry_times: 5
+  # 域名重试机制
+  domain_retry:
+    enable: true
+    # 重试次数
+    retry_count: 3
