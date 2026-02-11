@@ -1,4 +1,23 @@
 # app.py
+import sys
+import subprocess
+
+# 依赖检查与自动安装
+required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic']
+def install_package(package):
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+        print(f"Successfully installed {package}")
+    except subprocess.CalledProcessError:
+        print(f"Failed to install {package}")
+
+for package in required_packages:
+    try:
+        __import__(package if package != 'python-dotenv' else 'dotenv')
+    except ImportError:
+        print(f"Package {package} not found. Installing...")
+        install_package(package)
+
 import jmcomic
 from jmcomic.jm_config import JmModuleConfig
 from flask import Flask, request, abort, send_file
@@ -22,7 +41,10 @@ JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = True
 app = Flask(__name__)
 
 # 全局配置
-JM_BASE_DIR = os.getenv('JM_BASE_DIR', 'C:/a/b/your/path')
+# 获取当前脚本所在目录的绝对路径
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 默认使用当前目录作为基础目录
+JM_BASE_DIR = os.getenv('JM_BASE_DIR', CURRENT_DIR)
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
