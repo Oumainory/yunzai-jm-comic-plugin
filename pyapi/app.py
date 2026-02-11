@@ -44,7 +44,27 @@ app = Flask(__name__)
 # 获取当前脚本所在目录的绝对路径
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # 默认使用当前目录作为基础目录
-JM_BASE_DIR = os.getenv('JM_BASE_DIR', CURRENT_DIR)
+JM_BASE_DIR = os.getenv('JM_BASE_DIR')
+
+if not JM_BASE_DIR:
+    # 如果环境变量不存在，则设置为当前目录下的 download 文件夹
+    JM_BASE_DIR = os.path.join(CURRENT_DIR, 'download')
+    # 自动创建目录
+    os.makedirs(JM_BASE_DIR, exist_ok=True)
+    # 设置环境变量，以便 jmcomic 库或其他部分也能使用
+    os.environ['JM_BASE_DIR'] = JM_BASE_DIR
+    print(f"Environment variable 'JM_BASE_DIR' not set. Using default path: {JM_BASE_DIR}")
+else:
+    print(f"Using 'JM_BASE_DIR' from environment: {JM_BASE_DIR}")
+
+# 确保目录存在（无论是环境变量指定的还是默认的）
+if not os.path.exists(JM_BASE_DIR):
+    try:
+        os.makedirs(JM_BASE_DIR, exist_ok=True)
+        print(f"Created directory: {JM_BASE_DIR}")
+    except Exception as e:
+        print(f"Error creating directory {JM_BASE_DIR}: {e}")
+
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
