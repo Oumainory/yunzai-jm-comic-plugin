@@ -2,3 +2,4 @@ flask
 psutil
 python-dotenv
 jmcomic
+img2pdf
