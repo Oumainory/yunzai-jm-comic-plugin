@@ -1,12 +1,13 @@
 # app.py
 import sys
 import subprocess
+import os
 
 # 依赖检查与自动安装
-required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic']
+required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic', 'img2pdf']
 def install_package(package):
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--break-system-packages"])
         print(f"Successfully installed {package}")
     except subprocess.CalledProcessError:
         print(f"Failed to install {package}")
@@ -19,9 +20,9 @@ for package in required_packages:
         install_package(package)
 
 import jmcomic
+import img2pdf
 from jmcomic.jm_config import JmModuleConfig
 from flask import Flask, request, abort, send_file
-import os
 import shutil
 import logging
 import threading
@@ -158,6 +159,41 @@ def download_album(jm_id):
             logging.error(f"重试下载失败: {str(retry_e)}")
             return False
 
+# 手动合成 PDF 函数
+def generate_pdf_manually(jm_id):
+    """手动合成 PDF"""
+    try:
+        album_dir = os.path.join(IMAGE_FOLDER, str(jm_id))
+        if not os.path.exists(album_dir):
+            logging.error(f"PDF合成失败: 图片目录不存在 {album_dir}")
+            return False
+
+        # 获取所有图片文件并排序
+        images = []
+        for root, _, files in os.walk(album_dir):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                    images.append(os.path.join(root, file))
+        
+        # 简单的排序，可能需要根据实际文件名格式调整
+        images.sort()
+
+        if not images:
+            logging.error(f"PDF合成失败: 目录为空 {album_dir}")
+            return False
+
+        pdf_output_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
+        os.makedirs(PDF_FOLDER, exist_ok=True)
+
+        with open(pdf_output_path, "wb") as f:
+            f.write(img2pdf.convert(images))
+        
+        logging.info(f"手动合成 PDF 成功: {pdf_output_path}")
+        return True
+    except Exception as e:
+        logging.error(f"手动合成 PDF 异常: {str(e)}")
+        return False
+
 # 内存监控函数
 def memory_monitor():
     """监控内存使用情况并在必要时触发垃圾回收"""
@@ -224,8 +260,15 @@ def get_pdf():
     pdf_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
 
     if not os.path.exists(pdf_path):
+        logging.info(f"PDF不存在，开始下载: {jm_id}")
         if not download_album(jm_id):
             abort(503, description="下载失败")
+        
+        # 强制检查并生成 PDF
+        if not os.path.exists(pdf_path):
+            logging.info(f"插件未生成PDF，尝试手动合成: {jm_id}")
+            if not generate_pdf_manually(jm_id):
+                abort(500, description="PDF生成失败")
         
         if not os.path.exists(pdf_path):
             abort(404, description="资源下载后仍未找到")
