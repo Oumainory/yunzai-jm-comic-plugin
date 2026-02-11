@@ -65,6 +65,20 @@ if not os.path.exists(JM_BASE_DIR):
     except Exception as e:
         print(f"Error creating directory {JM_BASE_DIR}: {e}")
 
+# 自动复制配置文件逻辑
+target_option_path = os.path.join(JM_BASE_DIR, 'option.yml')
+source_option_path = os.path.join(CURRENT_DIR, 'option.yml')
+
+if not os.path.exists(target_option_path):
+    if os.path.exists(source_option_path):
+        try:
+            shutil.copy(source_option_path, target_option_path)
+            print(f"Successfully copied option.yml to {target_option_path}")
+        except Exception as e:
+            print(f"Error copying option.yml: {e}")
+    else:
+        print(f"Warning: option.yml not found in {CURRENT_DIR}, skipping copy.")
+
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
