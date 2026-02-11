@@ -44,12 +44,14 @@ app = Flask(__name__)
 # 全局配置
 # 获取当前脚本所在目录的绝对路径
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 默认使用当前目录作为基础目录
+# 默认使用当前目录的上级目录下的 resources 文件夹作为基础目录
+DEFAULT_RESOURCES_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '..', 'resources'))
+
 JM_BASE_DIR = os.getenv('JM_BASE_DIR')
 
 if not JM_BASE_DIR:
-    # 如果环境变量不存在，则设置为当前目录下的 download 文件夹
-    JM_BASE_DIR = os.path.join(CURRENT_DIR, 'download')
+    # 如果环境变量不存在，则设置为默认的 resources 文件夹
+    JM_BASE_DIR = DEFAULT_RESOURCES_DIR
     # 自动创建目录
     os.makedirs(JM_BASE_DIR, exist_ok=True)
     # 设置环境变量，以便 jmcomic 库或其他部分也能使用
