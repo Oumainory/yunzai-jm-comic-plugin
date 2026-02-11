@@ -1,5 +1,10 @@
 import path from 'path'; 
+import { fileURLToPath } from 'url';
 import fs from 'fs'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const pluginRoot = path.resolve(__dirname, '..');
+
 const Writeenv = /^#jm路径写入$/
 const Requirement = /^#jm安装依赖$/
 export class ejm extends plugin {
@@ -23,7 +28,7 @@ export class ejm extends plugin {
         )
     }
     async write(e){
-        const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
+        const JM_PATH = pluginRoot;
                 console.log(`获取工作路径:${JM_PATH}`);
                 const PY_PATH = {
                   pyapi: path.join(JM_PATH, 'pyapi'),
@@ -46,7 +51,7 @@ export class ejm extends plugin {
         await e.reply('写入完成，请留意控制台日志')
     }
     async requirement(e){
-      const JM_PATH = path.join(path.resolve(), 'plugins', 'jmcomic-plugin');
+      const JM_PATH = pluginRoot;
               console.log(`获取工作路径:${JM_PATH}`);
               const PY_PATH = {
                 pyapi: path.join(JM_PATH, 'pyapi'),
