@@ -71,7 +71,10 @@ export class ejm extends plugin {
   }
 }
 async function updateEnvVariable(key, newValue, envPath) {
-    const content = fs.readFileSync(envPath, 'utf-8');
+    let content = "";
+    if (fs.existsSync(envPath)) {
+        content = fs.readFileSync(envPath, 'utf-8');
+    }
     const updated = content
       .split('\n')
       .map(line => {
