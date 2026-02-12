@@ -20,7 +20,7 @@ try:
     from flask import Flask, request, abort, send_file
     import psutil
     from dotenv import load_dotenv
-    # from PIL import Image # 已移除显式检查，让 jmcomic 内部处理，或依靠 requirements.txt 保证
+    from PIL import Image # 启用 PIL 以支持 WebP 转换
 except ImportError as e:
     print(f"\n[Error] 缺少必要依赖: {e.name}")
     print("请手动运行安装命令:")
@@ -171,6 +171,7 @@ def download_album(jm_id):
 # 手动合成 PDF 函数
 def generate_pdf_manually(jm_id):
     """手动合成 PDF"""
+    import io
     try:
         album_dir = os.path.join(IMAGE_FOLDER, str(jm_id))
         if not os.path.exists(album_dir):
@@ -194,11 +195,35 @@ def generate_pdf_manually(jm_id):
         pdf_output_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
         os.makedirs(PDF_FOLDER, exist_ok=True)
 
-        with open(pdf_output_path, "wb") as f:
-            f.write(img2pdf.convert(images))
+        # 转换 WebP 或其他不兼容格式为 PDF 字节流
+        # img2pdf 不直接支持 WebP，需要先转换
+        converted_images = []
         
-        logging.info(f"手动合成 PDF 成功: {pdf_output_path}")
-        return True
+        try:
+            for img_path in images:
+                if img_path.lower().endswith('.webp'):
+                    # 将 WebP 转换为 JPEG 字节流
+                    with Image.open(img_path) as img:
+                        if img.mode == 'RGBA':
+                            img = img.convert('RGB')
+                        
+                        # 保存到内存 buffer
+                        img_byte_arr = io.BytesIO()
+                        img.save(img_byte_arr, format='JPEG')
+                        converted_images.append(img_byte_arr.getvalue())
+                else:
+                    # 其他格式直接添加路径
+                    converted_images.append(img_path)
+
+            with open(pdf_output_path, "wb") as f:
+                f.write(img2pdf.convert(converted_images))
+        
+            logging.info(f"手动合成 PDF 成功: {pdf_output_path}")
+            return True
+        except Exception as e:
+            logging.error(f"PDF转换过程中出错: {str(e)}")
+            return False
+            
     except Exception as e:
         logging.error(f"手动合成 PDF 异常: {str(e)}")
         return False
@@ -280,16 +305,63 @@ def get_image():
     if not isinstance(jm_id, int) or jm_id <= 0:
         abort(400, description="参数 jm 必须为正整数")
 
-    image_path = os.path.join(IMAGE_FOLDER, f"{jm_id}.png")
-
-    if not os.path.exists(image_path):
+    # 定义支持的图片后缀
+    SUPPORTED_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
+    
+    # 查找存在的图片文件
+    image_path = None
+    for ext in SUPPORTED_EXTENSIONS:
+        temp_path = os.path.join(IMAGE_FOLDER, f"{jm_id}{ext}")
+        if os.path.exists(temp_path):
+            image_path = temp_path
+            break
+            
+    # 如果没找到，尝试下载
+    if not image_path:
         if not download_album(jm_id):
             abort(503, description="下载失败")
         
-        if not os.path.exists(image_path):
+        # 下载后再次查找
+        for ext in SUPPORTED_EXTENSIONS:
+            temp_path = os.path.join(IMAGE_FOLDER, f"{jm_id}{ext}")
+            if os.path.exists(temp_path):
+                image_path = temp_path
+                break
+        
+        # 特殊处理：如果是下载的是本子（album），图片可能在子文件夹里
+        # jmcomic 下载本子默认会创建一个以 jm_id 命名的文件夹
+        if not image_path:
+            album_dir = os.path.join(IMAGE_FOLDER, str(jm_id))
+            if os.path.exists(album_dir) and os.path.isdir(album_dir):
+                # 获取第一张图片作为封面/预览
+                for root, _, files in os.walk(album_dir):
+                    files.sort() # 确保有序
+                    for file in files:
+                        if file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
+                            image_path = os.path.join(root, file)
+                            break
+                    if image_path:
+                        break
+
+        if not image_path:
+            # 记录目录内容以便调试
+            try:
+                if os.path.exists(IMAGE_FOLDER):
+                    files = os.listdir(IMAGE_FOLDER)
+                    logging.error(f"Image not found for {jm_id}. Files in {IMAGE_FOLDER}: {files}")
+                else:
+                    logging.error(f"Image folder not found: {IMAGE_FOLDER}")
+            except Exception as e:
+                logging.error(f"Error listing files: {e}")
             abort(404, description="资源下载后仍未找到")
 
-    return send_file(image_path, mimetype='image/png')
+    # 根据文件扩展名确定 MIME 类型
+    import mimetypes
+    mimetype, _ = mimetypes.guess_type(image_path)
+    if not mimetype:
+        mimetype = 'image/png' # 默认值
+
+    return send_file(image_path, mimetype=mimetype)
 
 @app.route('/jmdp', methods=['GET'])
 def get_pdf():
