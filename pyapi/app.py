@@ -20,7 +20,7 @@ try:
     from flask import Flask, request, abort, send_file
     import psutil
     from dotenv import load_dotenv
-    from PIL import Image
+    # from PIL import Image # 已移除显式检查，让 jmcomic 内部处理，或依靠 requirements.txt 保证
 except ImportError as e:
     print(f"\n[Error] 缺少必要依赖: {e.name}")
     print("请手动运行安装命令:")
@@ -44,6 +44,16 @@ load_dotenv()
 
 # 开启自动更新域名（确保全局生效，包括WSGI模式）
 JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = True
+
+# 尝试在启动时立即更新一次域名，确保拿到最新的可用域名
+try:
+    logging.info("正在尝试自动更新 API 域名列表...")
+    from jmcomic import JmApiClient
+    # 临时创建一个 client 来触发更新
+    JmApiClient(get_jm_option())
+    logging.info(f"域名更新完成。当前可用 API 域名: {JmModuleConfig.DOMAIN_API_LIST}")
+except Exception as e:
+    logging.error(f"域名自动更新失败: {e}，将使用默认域名列表")
 
 # Flask 初始化
 app = Flask(__name__)
