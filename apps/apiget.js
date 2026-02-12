@@ -8,12 +8,44 @@ import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
-const API_URL = 'http://127.0.0.1:8000';
+
+// 默认配置
+let CONFIG = {
+    api_url: 'http://127.0.0.1:8000',
+    public_api_url: 'http://127.0.0.1:8000' // 新增：用于发送给QQ适配器的地址
+};
+
+// 加载配置
+const CONFIG_FILE = path.join(pluginRoot, 'config', 'config.json');
+if (fs.existsSync(CONFIG_FILE)) {
+    try {
+        const userConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+        CONFIG = { ...CONFIG, ...userConfig };
+        // 如果用户只配了 api_url 没配 public_api_url，默认两者一致
+        if (userConfig.api_url && !userConfig.public_api_url) {
+            CONFIG.public_api_url = userConfig.api_url;
+        }
+    } catch (e) {
+        console.error('加载配置文件失败:', e);
+    }
+} else {
+    // 自动创建默认配置文件
+    const configDir = path.dirname(CONFIG_FILE);
+    if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+    }
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 4));
+}
+
+const API_URL = CONFIG.api_url;
+const PUBLIC_API_URL = CONFIG.public_api_url;
 
 const jm = /^#jm查(.*)$/
 const Apirun = /^#jm(启动|重启)api$/
 const Apitimerestart = /^#jm定时检查$/
 const Apirestart = /^#jm检查api$/
+const SetApiUrl = /^#jm设置api地址(.*)$/
+
 export class ejm extends plugin {
     constructor() {
         super({
@@ -25,26 +57,57 @@ export class ejm extends plugin {
                     reg: jm,
                     fnc: "Jm"
                 },{
-                  reg: Apirun,
-                  fnc: "apirun",
-                  permission: "master"
-              },{
-                reg: Apitimerestart,
-                fnc: "apitimerestart",
-                permission: "master"
-            },{
-              reg: Apirestart,
-              fnc: "apirestart",
-          },
+                    reg: Apirun,
+                    fnc: "apirun",
+                    permission: "master"
+                },{
+                    reg: Apitimerestart,
+                    fnc: "apitimerestart",
+                    permission: "master"
+                },{
+                    reg: Apirestart,
+                    fnc: "apirestart",
+                },{
+                    reg: SetApiUrl,
+                    fnc: "setApiUrl",
+                    permission: "master"
+                }
             ]
         }
         )
+    }
+
+    async setApiUrl(e) {
+        let url = e.msg.replace(/#jm设置api地址/g, "").trim();
+        if (!url) {
+            return e.reply(`当前配置:\n内部API: ${CONFIG.api_url}\n外部API: ${CONFIG.public_api_url}\n\n请发送: #jm设置api地址 http://IP:PORT`);
+        }
+        
+        // 简单校验
+        if (!url.startsWith('http')) {
+            url = 'http://' + url;
+        }
+        
+        // 更新配置
+        CONFIG.api_url = url;
+        CONFIG.public_api_url = url; // 默认同时修改两者
+        
+        try {
+            fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 4));
+            // 提示用户重启生效，或者这里其实已经是热更了（对于新请求）
+            // 但是 API_URL 和 PUBLIC_API_URL 是 const，需要改成 let 或者直接使用 CONFIG.xxx
+            // 由于上面用的是 const，这里实际上不会立即生效，除非重启插件
+            // 所以我们修改代码结构，不再使用 const API_URL
+            return e.reply(`API地址已更新为: ${url}\n请重启Bot或重载插件生效！`);
+        } catch (err) {
+            return e.reply(`保存配置失败: ${err}`);
+        }
     }
       async Jm(e) {
         let tup = e.msg.replace(/#jm查/g, "").trim();
     
         // 构造请求URL
-        let url = `${API_URL}/jmd?jm=${encodeURIComponent(tup)}`;
+        let url = `${CONFIG.api_url}/jmd?jm=${encodeURIComponent(tup)}`;
     
         try {
             // 发起请求，仅获取头部信息
@@ -73,8 +136,33 @@ export class ejm extends plugin {
             return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
         }
     
-            // 发送预览图
-            let msg = [segment.image(res.url)]; // 返回的是图片
+            // 查找本地图片文件
+            // Python下载的目录结构: resources/long/{tup}/...
+            // 找到第一张图片
+            const albumPath = path.join(pluginRoot, 'resources', 'long', tup);
+            let imagePath = null;
+            
+            if (fs.existsSync(albumPath) && fs.lstatSync(albumPath).isDirectory()) {
+                const files = fs.readdirSync(albumPath).sort();
+                for (const file of files) {
+                    if (file.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
+                        imagePath = path.join(albumPath, file);
+                        break;
+                    }
+                }
+            }
+            
+            // 如果没找到图片，可能是下载失败或者目录不对，尝试回退到 URL (虽然 URL 大概率也不通)
+            let msg;
+            if (imagePath) {
+                logger.info(`[jm] 找到本地图片: ${imagePath}`);
+                msg = [segment.image(imagePath)];
+            } else {
+                logger.warn(`[jm] 未找到本地图片，回退到URL模式: ${tup}`);
+                let imageUrl = `${CONFIG.public_api_url}/jmd?jm=${encodeURIComponent(tup)}`;
+                msg = [segment.image(imageUrl)];
+            }
+
             const forward = [
               '爱护jm，不要爬这么多本子，jm压力大你bot压力也大，西门',
               `https://18comic.vip/photo/${tup}`
@@ -82,7 +170,18 @@ export class ejm extends plugin {
             forward.push(msg);
             
             // 尝试获取 PDF
-            let pdfUrl = `${API_URL}/jmdp?jm=${encodeURIComponent(tup)}`;
+            // 直接查找本地 PDF 文件: resources/pdf/{tup}.pdf
+            const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
+            let pdfToSend = null;
+            
+            if (fs.existsSync(pdfPath)) {
+                 logger.info(`[jm] 找到本地PDF: ${pdfPath}`);
+                 pdfToSend = pdfPath;
+            } else {
+                 // 回退到 URL
+                 pdfToSend = `${CONFIG.public_api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
+            }
+            
             try {
                 logger.info('正在尝试获取PDF文件...');
                 // 直接发送文件，如果文件生成需要时间，用户可能需要等待
@@ -100,7 +199,7 @@ export class ejm extends plugin {
             
             // 单独发送 PDF 文件
             try {
-                await e.reply(segment.file(pdfUrl));
+                await e.reply(segment.file(pdfToSend));
             } catch (err) {
                 logger.error(`发送PDF失败: ${err}`);
                 await e.reply(`PDF发送失败，请检查日志。`);
@@ -184,7 +283,7 @@ export class ejm extends plugin {
       async function checkTask(e = null) {
         try {
           console.log('执行检查，时间:', new Date().toLocaleTimeString());
-          let url = API_URL;
+          let url = CONFIG.api_url;
           let res = await fetch(url);
           console.log(`当前状态：${res.status}`)
           if(e) e.reply(`当前状态：${res.status}`)
