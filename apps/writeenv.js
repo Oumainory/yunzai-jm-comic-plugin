@@ -1,6 +1,7 @@
 import path from 'path'; 
 import { fileURLToPath } from 'url';
 import fs from 'fs'
+import plugin from '../../../lib/plugins/plugin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
@@ -64,7 +65,7 @@ export class ejm extends plugin {
               try {
                 await Bot.exec(`pip install -r ${ppp}/requirements.txt`)
               } catch (error) {
-                await this.reply(`错误，报错情况为：${error}`)
+                await e.reply(`错误，报错情况为：${error}`)
               }
       
       return e.reply('api依赖安装完成，请留意控制台日志')
