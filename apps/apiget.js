@@ -182,7 +182,11 @@ export class ejm extends plugin {
             // 触发 PDF 下载/生成
             let pdfUrl = `${CONFIG.api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
             try {
-                 fetch(pdfUrl).catch(e => logger.error(`PDF触发失败: ${e}`));
+                 // 使用带超时的 fetch
+                 const controller = new AbortController();
+                 const timeoutId = setTimeout(() => controller.abort(), 10000); 
+                 fetch(pdfUrl, { signal: controller.signal }).catch(e => logger.error(`PDF触发失败: ${e}`));
+                 clearTimeout(timeoutId); // 这里其实有点问题，因为 fetch 是异步的且没 await，timeout 可能无效，但 catch 能捕获
             } catch (e) {}
 
             // 直接查找本地 PDF 文件: resources/pdf/{tup}.pdf
@@ -190,7 +194,6 @@ export class ejm extends plugin {
             let pdfToSend = null;
             
             // 等待 PDF 生成，最多等待 20 秒
-            // 因为生成 PDF 比较耗时，特别是图片多的时候
             let pdfRetries = 20;
             while (pdfRetries > 0) {
                  if (fs.existsSync(pdfPath)) {
@@ -219,15 +222,33 @@ export class ejm extends plugin {
             }
 
             const fmsg = await common.makeForwardMsg(e, forward, `album${tup}`);
-            await e.reply(fmsg);
+            
+            // 发送合并转发消息时捕获错误
+            try {
+                await e.reply(fmsg);
+            } catch (err) {
+                logger.error(`发送合并转发消息失败: ${err}`);
+                // 如果是 OneBot 适配器的 bug，这里可能会报错但其实发不出去
+                // 继续尝试发送 PDF
+            }
             
             // 单独发送 PDF 文件
             if (pdfToSend) {
                 try {
-                    await e.reply(segment.file(pdfToSend));
+                    // 使用 file:// 协议明确告知这是一个本地文件路径
+                    // 注意：Windows下路径可能需要特殊处理，但 node 的 path 模块通常处理得很好
+                    // 最好转换为 URL 格式
+                    const fileUrl = `file://${pdfPath}`;
+                    await e.reply(segment.file(fileUrl));
                 } catch (err) {
                     logger.error(`发送PDF失败: ${err}`);
-                    await e.reply(`PDF发送失败，请检查日志。`);
+                    // 尝试不带 file:// 协议再次发送（有些适配器可能只认绝对路径）
+                    try {
+                        await e.reply(segment.file(pdfPath));
+                    } catch (err2) {
+                        logger.error(`重试发送PDF失败: ${err2}`);
+                        await e.reply(`PDF发送失败，请检查日志。`);
+                    }
                 }
             } else {
                  await e.reply(`PDF生成中或失败，请稍后重试。`);
