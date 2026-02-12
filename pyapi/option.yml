@@ -2,10 +2,9 @@
 dir_rule:
   # 下载基础路径，留空则由 app.py 自动控制（推荐）
   base_dir: 
-  # 图片下载规则：base_dir/long/album_id/
-  image: long
-  # PDF下载规则：base_dir/pdf/
-  pdf: pdf
+  # 命名规则，JMComic库需要这个参数
+  rule: Bd_Ptitle_Atitle
+
 
 # 下载配置
 download:
