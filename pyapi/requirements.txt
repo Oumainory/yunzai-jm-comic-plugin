@@ -1,5 +1,9 @@
 flask
 psutil
 python-dotenv
-jmcomic
 img2pdf
+curl_cffi
+commonX
+PyYAML
+Pillow
+pycryptodome
