@@ -48,7 +48,7 @@ export class ejm extends plugin {
       tup = tup.replace(/#jm查/g, "").trim();
   
       // 构造请求URL
-      let url = `http://127.0.0.1:8000/jmd?jm=${encodeURIComponent(tup)}`;
+      let url = `http://127.0.0.1:5000/jmd?jm=${encodeURIComponent(tup)}`;
   
       try {
           // 发起请求
@@ -67,35 +67,25 @@ export class ejm extends plugin {
           const bytes = Buffer.byteLength(responseText, "utf8");
           console.log(`图片大小：${bytes}字节`);
           if (bytes >= 31457280) {
-            let url = `http://127.0.0.1:8000/jmdp?jm=${encodeURIComponent(tup)}`;
-            try{
-              logger.warn('图片过大，将请求pdf下载并文件发送');
+            // 图片过大，改为直接发送 PDF URL，让适配器自己去下载
+            let pdfUrl = `http://127.0.0.1:5000/jmdp?jm=${encodeURIComponent(tup)}`;
+            
+            try {
+              logger.warn('图片过大，尝试发送 PDF 链接');
+              e.reply('文件拉取中，请耐心等待...');
               
-              let res = await fetch(url);
-              if (!res || !res.ok) {
-                logger.error('[jm] 请求失败');
-                return await this.reply('错误，请检查车号或稍后重试！');
-            }
-              if(res.status == 200) console.log('状态ok')
-              e.reply('文件拉取完成，耐心等待发送吧')
-              const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
-              
-              // 修复路径协议：如果是绝对路径，强制添加 file:// 前缀
-              const fileUrl = path.isAbsolute(pdfPath) ? `file://${pdfPath}` : pdfPath;
-              
-              if(!e.group){// 检测当前是否为群聊环境
-                 await e.reply(e.friend.sendFile(fileUrl)) 
-              }else{
-                 await e.reply(e.group.fs.upload(fileUrl))
-
+              if (!e.group) { // 检测当前是否为群聊环境
+                 await e.reply(e.friend.sendFile(pdfUrl));
+              } else {
+                 await e.reply(e.group.sendFile(pdfUrl));
               }
               return true; 
-            }catch(err){
-               logger.error(err)
-               return await this.reply('错误，请检查车号或稍后重试！');
+            } catch (err) {
+               logger.error(err);
+               return await this.reply('错误，发送文件失败，请稍后重试！');
             }
               
-          }else{
+          } else {
        
           let msg = [segment.image(res.url)]; // 返回的是图片
           const forward = [
@@ -144,7 +134,7 @@ export class ejm extends plugin {
       async apirestart(e){
         try {
           console.log('执行检查，时间:', new Date().toLocaleTimeString());
-          let url = 'http://127.0.0.1:8000'
+          let url = 'http://127.0.0.1:5000'
           let res = await fetch(url);
           e.reply(`当前状态：${res.status}`)
           return true
@@ -177,7 +167,7 @@ export class ejm extends plugin {
       async function checkTask() {
         try {
           console.log('执行检查，时间:', new Date().toLocaleTimeString());
-          let url = 'http://127.0.0.1:8000'
+          let url = 'http://127.0.0.1:5000'
           let res = await fetch(url);
           console.log(`当前状态：${res.status}`)
         } catch (error) {
