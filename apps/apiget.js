@@ -91,7 +91,8 @@ export class ejm extends plugin {
           
             
       }
-            return true; // 返回 true，阻挡消息不再往下
+            // 不需要再返回 true，因为已经回复了
+            // return true; // 返回 true，阻挡消息不再往下
             } catch (err) {
             logger.error(`[jm] 请求失败：${err}`);
             
