@@ -31,13 +31,14 @@
     git clone https://github.com/Oumainory/yunzai-jm-comic-plugin.git ./plugins/yz-jmcomic-plugin
     ```
 
-2.  **安装 Python 依赖**  
-    进入插件的 `pyapi` 目录，并安装所需的 Python 库：
+2.  **安装 Python 依赖 (手动安装)**  
+    进入插件的 `pyapi` 目录，并安装所需的 Python 库。
+    > **注意**：如果不运行此步骤，插件将无法启动。如果遇到权限问题，请在命令后加 `--break-system-packages` 或使用虚拟环境。
     ```bash
     cd plugins/yz-jmcomic-plugin/pyapi
-    pip install -r requirements.txt
+    pip3 install -r requirements.txt
     ```
-    > 💡 **提示**：建议使用国内镜像源加速安装，例如：`pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple`
+    *(如果报错缺少模块，请务必执行上述命令)*
 
 3.  **配置选项**  
     检查 `pyapi/option.yml` 配置文件。虽然插件支持开箱即用（免配置），但建议您确认下载路径等设置符合您的需求。
@@ -72,9 +73,7 @@
 2.  **核心层 (Python)**：Flask 服务接收请求后，调用 `jmcomic` 库处理复杂的爬虫逻辑（域名解析、加密解密、图片下载）。
 3.  **交付层**：
     *   Python 后端将下载的图片或合成的 PDF 存储在本地。
-    *   Node.js 前端根据响应获取文件路径，并将其发送给用户。
-
-这种架构充分利用了 Python 在爬虫领域的生态优势，同时保持了 Bot 的轻量级和响应速度。
+    *   Node.js 前端使用 `e.reply(segment.file(url))` 方式发送文件。这种方式是 Yunzai 生态的标准写法，兼容性极佳，无论是私聊还是群聊，无论是本地文件还是网络 URL，都能被适配器正确识别和发送。
 
 ## ⚠️ 免责声明
 
