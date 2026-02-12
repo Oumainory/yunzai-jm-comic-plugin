@@ -4,7 +4,8 @@ dir_rule:
   # 注意：由于 jmcomic 库的限制，这里必须填一个占位符，app.py 之后会覆盖它
   base_dir: /tmp/placeholder
   # 命名规则，JMComic库需要这个参数
-  rule: Bd_Ptitle_Atitle
+  # 强制使用 Bd_Aid (基础目录/ID) 以便 API 能通过 ID 找到文件
+  rule: Bd_Aid
 
 
 # 下载配置
