@@ -5,13 +5,25 @@ import os
 
 # 依赖检查与自动安装 (已禁用，避免Linux权限问题)
 # 用户需手动运行 pip install -r requirements.txt
-required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic', 'img2pdf']
+# required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic', 'img2pdf']
 # ... (removed auto install code) ...
 
-import jmcomic
-import img2pdf
+# 检查核心依赖是否存在，如果不存在则友好提示
+try:
+    import jmcomic
+    import img2pdf
+    from flask import Flask, request, abort, send_file
+    import psutil
+    from dotenv import load_dotenv
+except ImportError as e:
+    print(f"\n[Error] 缺少必要依赖: {e.name}")
+    print("请手动运行安装命令:")
+    print(f"pip install -r {os.path.join(os.path.dirname(os.path.abspath(__file__)), 'requirements.txt')}")
+    if os.name != 'nt': # Linux/Mac
+        print("注意: Linux环境下可能需要使用: pip3 install -r requirements.txt --break-system-packages")
+    sys.exit(1)
+
 from jmcomic.jm_config import JmModuleConfig
-from flask import Flask, request, abort, send_file
 import shutil
 import logging
 import threading
