@@ -20,6 +20,7 @@ try:
     from flask import Flask, request, abort, send_file
     import psutil
     from dotenv import load_dotenv
+    from PIL import Image
 except ImportError as e:
     print(f"\n[Error] 缺少必要依赖: {e.name}")
     print("请手动运行安装命令:")
