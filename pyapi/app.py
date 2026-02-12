@@ -240,6 +240,38 @@ def memory_monitor():
             logging.error(f"内存监控错误: {str(e)}")
             time.sleep(60)  # 出错后等待更长时间
 
+def check_and_release_port(port):
+    """检查端口占用并尝试释放"""
+    import psutil
+    try:
+        # 获取当前进程PID，避免误杀自己（虽然此时自己还没绑定端口，但为了保险）
+        current_pid = os.getpid()
+        
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                # 忽略当前进程
+                if proc.pid == current_pid:
+                    continue
+                    
+                for con in proc.connections():
+                    if con.laddr.port == port:
+                        logging.warning(f"检测到端口 {port} 被进程 PID={proc.pid} Name={proc.name()} 占用")
+                        logging.info("尝试终止占用端口的进程...")
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)
+                            logging.info(f"进程 {proc.pid} 已终止，端口释放成功")
+                        except psutil.TimeoutExpired:
+                            logging.warning(f"进程 {proc.pid} 无法终止，尝试强制杀死...")
+                            proc.kill()
+                            proc.wait(timeout=3)
+                            logging.info(f"进程 {proc.pid} 已被强制杀死")
+                        return
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+    except Exception as e:
+        logging.error(f"释放端口失败: {e}")
+
 # 路由处理
 @app.route('/jmd', methods=['GET'])
 def get_image():
@@ -345,6 +377,9 @@ if __name__ == '__main__':
     monitor_thread.start()
     logging.info("内存监控线程已启动")
     
+    # 检查端口占用
+    check_and_release_port(FLASK_PORT)
+
     try:
         app.run(
             host=FLASK_HOST,
