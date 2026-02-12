@@ -126,6 +126,14 @@ def get_jm_option(force_reload=False):
         try:
             logging.info(f"{'重新' if force_reload else '首次'}加载配置: {OPTION_YML_PATH}")
             JM_OPTION = jmcomic.create_option_by_file(OPTION_YML_PATH)
+            
+            # 强制覆盖下载路径和命名规则，确保 app.py 能找到文件
+            if IMAGE_FOLDER:
+                JM_OPTION.dir_rule.base_dir = IMAGE_FOLDER
+                # 强制使用 ID 作为文件夹名，因为 app.py 的查找逻辑依赖于 ID
+                JM_OPTION.dir_rule.rule = 'Bd_Aid' 
+                logging.info(f"配置重写: base_dir -> {IMAGE_FOLDER}, rule -> Bd_Aid")
+                
         except Exception as e:
             logging.error(f"加载配置失败: {str(e)}")
             raise e
