@@ -331,7 +331,8 @@ if __name__ == '__main__':
         logging.info("正在尝试自动更新 API 域名列表...")
         from jmcomic import JmApiClient
         # 临时创建一个 client 来触发更新
-        JmApiClient(get_jm_option())
+        # Fix: 使用 option 创建 client，而不是直接传入 option
+        get_jm_option().new_jm_client(impl=JmApiClient)
         logging.info(f"域名更新完成。当前可用 API 域名: {JmModuleConfig.DOMAIN_API_LIST}")
     except Exception as e:
         logging.error(f"域名自动更新失败: {e}，将使用默认域名列表")
@@ -351,6 +352,11 @@ if __name__ == '__main__':
             debug=False,
             use_reloader=False
         )
+    except OSError as e:
+        if e.errno == 98 or e.errno == 10048: # Address already in use (Linux / Windows)
+             logging.error(f"端口 {FLASK_PORT} 已被占用，请检查是否有其他服务正在运行，或修改 FLASK_PORT 环境变量。")
+        else:
+             logging.error(f"启动服务失败: {e}")
     except KeyboardInterrupt:
         logging.info("接收到中断信号，停止服务...")
     finally:
