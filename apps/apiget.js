@@ -110,16 +110,16 @@ export class ejm extends plugin {
         let url = `${CONFIG.api_url}/jmd?jm=${encodeURIComponent(tup)}`;
     
         try {
-            // 发起请求，仅获取头部信息
-            // 这里我们并不真的需要获取头部信息，而是为了触发下载
-            // 如果已经在本地找到了，甚至不需要这一步？
-            // 不，还是需要触发一下，万一没下载完或者需要更新
-            
+            // 发起请求，触发 Python 下载
+            // 使用 try-catch 忽略 fetch 错误，因为我们主要依赖本地文件
             let res;
             try {
-                res = await fetch(url);
+                // 设置超时，避免请求卡住
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
+                res = await fetch(url, { signal: controller.signal });
+                clearTimeout(timeoutId);
             } catch (err) {
-                 // 忽略 fetch 错误，如果本地有文件则继续
                  logger.error(`[jm] 触发下载API失败: ${err}`);
             }
 
@@ -129,42 +129,44 @@ export class ejm extends plugin {
             const albumPath = path.join(pluginRoot, 'resources', 'long', tup);
             let imagePath = null;
             
-            // 等待一小段时间让文件系统刷新/下载完成（如果之前没下载）
-            if (res && res.ok) {
-                 // 如果 API 请求成功，理论上文件应该有了，或者正在下载
-                 // 可以稍微等等
+            // 循环检测文件是否存在，最多等待 15 秒
+            // 这是为了等待 Python 后台下载完成
+            let maxRetries = 15; 
+            while (maxRetries > 0) {
+                if (fs.existsSync(albumPath) && fs.lstatSync(albumPath).isDirectory()) {
+                    const files = fs.readdirSync(albumPath).sort();
+                    for (const file of files) {
+                        if (file.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
+                            imagePath = path.join(albumPath, file);
+                            break;
+                        }
+                    }
+                    if (imagePath) break; // 找到了，跳出循环
+                }
+                
+                // 如果 API 返回了明确的错误（如 404），则不再等待
+                if (res && !res.ok && res.status !== 503) { // 503可能是下载失败，可以再等等看有没有残留文件？或者直接退出
+                     break; 
+                }
+
+                await new Promise(r => setTimeout(r, 1000)); // 等待 1 秒
+                maxRetries--;
             }
 
-            if (fs.existsSync(albumPath) && fs.lstatSync(albumPath).isDirectory()) {
-                const files = fs.readdirSync(albumPath).sort();
-                for (const file of files) {
-                    if (file.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
-                        imagePath = path.join(albumPath, file);
-                        break;
-                    }
-                }
-            }
-            
-            // 如果没找到图片，可能是下载失败或者目录不对，或者 API 报错了
+            // 如果没找到图片
             if (!imagePath) {
-                 // 如果之前 API 请求失败了，并且本地也没图，那就真的失败了
-                 if (!res || !res.ok) {
-                      if (res) {
-                          if (res.status === 404) {
-                              return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
-                          } else if (res.status === 503) {
-                              return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
-                          }
+                 if (res) {
+                      if (res.status === 404) {
+                          return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
+                      } else if (res.status === 503) {
+                          return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
+                      } else if (!res.ok) {
                           return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
-                      } else {
-                          // fetch 抛错
-                          return await e.reply('API连接失败，请检查服务状态。');
                       }
                  }
-                 
-                 // 如果 API 成功了但没找到图，可能是路径问题
-                 logger.warn(`[jm] API返回成功但未找到本地图片: ${albumPath}`);
-                 return await e.reply('资源下载看似成功但未找到本地文件，请检查日志。');
+                 // API 没响应或者响应成功但没文件
+                 logger.warn(`[jm] 未找到本地图片: ${albumPath}`);
+                 return await e.reply('资源下载超时或失败，请稍后重试。');
             }
 
             let msg = [segment.image(imagePath)];
@@ -177,10 +179,9 @@ export class ejm extends plugin {
             forward.push(msg);
             
             // 尝试获取 PDF
-            // 触发 PDF 下载/生成 (如果不存在)
+            // 触发 PDF 下载/生成
             let pdfUrl = `${CONFIG.api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
             try {
-                // 只是触发，不等待返回内容，也不用结果
                  fetch(pdfUrl).catch(e => logger.error(`PDF触发失败: ${e}`));
             } catch (e) {}
 
@@ -188,17 +189,21 @@ export class ejm extends plugin {
             const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
             let pdfToSend = null;
             
-            // 稍微等待一下 PDF 生成，如果它是第一次生成
-            // 简单的 sleep
-            await new Promise(r => setTimeout(r, 1000));
+            // 等待 PDF 生成，最多等待 20 秒
+            // 因为生成 PDF 比较耗时，特别是图片多的时候
+            let pdfRetries = 20;
+            while (pdfRetries > 0) {
+                 if (fs.existsSync(pdfPath)) {
+                      logger.info(`[jm] 找到本地PDF: ${pdfPath}`);
+                      pdfToSend = pdfPath;
+                      break;
+                 }
+                 await new Promise(r => setTimeout(r, 1000));
+                 pdfRetries--;
+            }
 
-            if (fs.existsSync(pdfPath)) {
-                 logger.info(`[jm] 找到本地PDF: ${pdfPath}`);
-                 pdfToSend = pdfPath;
-            } else {
-                 // 如果本地没有，那可能是还在生成中，或者生成失败
-                 // 这里我们不再回退到 URL，因为 URL 肯定不通
-                 logger.warn(`[jm] 未找到本地PDF: ${pdfPath}`);
+            if (!pdfToSend) {
+                 logger.warn(`[jm] 未找到本地PDF (超时): ${pdfPath}`);
             }
             
             try {
