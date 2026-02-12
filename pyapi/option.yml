@@ -1,7 +1,8 @@
 # 基础配置
 dir_rule:
   # 下载基础路径，留空则由 app.py 自动控制（推荐）
-  base_dir: 
+  # 注意：由于 jmcomic 库的限制，这里必须填一个占位符，app.py 之后会覆盖它
+  base_dir: /tmp/placeholder
   # 命名规则，JMComic库需要这个参数
   rule: Bd_Ptitle_Atitle
 
