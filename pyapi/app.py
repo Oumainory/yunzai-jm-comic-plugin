@@ -45,16 +45,6 @@ load_dotenv()
 # 开启自动更新域名（确保全局生效，包括WSGI模式）
 JmModuleConfig.FLAG_API_CLIENT_AUTO_UPDATE_DOMAIN = True
 
-# 尝试在启动时立即更新一次域名，确保拿到最新的可用域名
-try:
-    logging.info("正在尝试自动更新 API 域名列表...")
-    from jmcomic import JmApiClient
-    # 临时创建一个 client 来触发更新
-    JmApiClient(get_jm_option())
-    logging.info(f"域名更新完成。当前可用 API 域名: {JmModuleConfig.DOMAIN_API_LIST}")
-except Exception as e:
-    logging.error(f"域名自动更新失败: {e}，将使用默认域名列表")
-
 # Flask 初始化
 app = Flask(__name__)
 
@@ -336,6 +326,16 @@ def return_status():
 if __name__ == '__main__':
     configure_logging()
     
+    # 尝试在启动时立即更新一次域名，确保拿到最新的可用域名
+    try:
+        logging.info("正在尝试自动更新 API 域名列表...")
+        from jmcomic import JmApiClient
+        # 临时创建一个 client 来触发更新
+        JmApiClient(get_jm_option())
+        logging.info(f"域名更新完成。当前可用 API 域名: {JmModuleConfig.DOMAIN_API_LIST}")
+    except Exception as e:
+        logging.error(f"域名自动更新失败: {e}，将使用默认域名列表")
+
     logging.info("服务启动，执行首次清理...")
     cleanup_folders()
     
