@@ -111,37 +111,30 @@ export class ejm extends plugin {
     
         try {
             // 发起请求，仅获取头部信息
-            let res = await fetch(url);
-    
-            // 检查请求是否成功
-        if (!res || !res.ok) {
-            logger.error(`[jm] 请求失败，状态码: ${res ? res.status : '无响应'}`);
-            // 如果是连接拒绝，尝试重启
-            if (!res) {
-                await restartApi();
-                return await e.reply('API未响应，正在尝试自动重启，请稍后再试！');
-            }
+            // 这里我们并不真的需要获取头部信息，而是为了触发下载
+            // 如果已经在本地找到了，甚至不需要这一步？
+            // 不，还是需要触发一下，万一没下载完或者需要更新
             
-            // 细分错误提示
-            if (res.status === 404) {
-                return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
-            } else if (res.status === 503) {
-                return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
-            } else if (res.status === 500) {
-                return await e.reply('服务器内部错误 (500)，请检查后台日志。');
-            } else if (res.status === 400) {
-                return await e.reply('参数错误 (400)，请输入正确的数字车号。');
+            let res;
+            try {
+                res = await fetch(url);
+            } catch (err) {
+                 // 忽略 fetch 错误，如果本地有文件则继续
+                 logger.error(`[jm] 触发下载API失败: ${err}`);
             }
-            
-            return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
-        }
-    
+
             // 查找本地图片文件
             // Python下载的目录结构: resources/long/{tup}/...
             // 找到第一张图片
             const albumPath = path.join(pluginRoot, 'resources', 'long', tup);
             let imagePath = null;
             
+            // 等待一小段时间让文件系统刷新/下载完成（如果之前没下载）
+            if (res && res.ok) {
+                 // 如果 API 请求成功，理论上文件应该有了，或者正在下载
+                 // 可以稍微等等
+            }
+
             if (fs.existsSync(albumPath) && fs.lstatSync(albumPath).isDirectory()) {
                 const files = fs.readdirSync(albumPath).sort();
                 for (const file of files) {
@@ -152,16 +145,30 @@ export class ejm extends plugin {
                 }
             }
             
-            // 如果没找到图片，可能是下载失败或者目录不对，尝试回退到 URL (虽然 URL 大概率也不通)
-            let msg;
-            if (imagePath) {
-                logger.info(`[jm] 找到本地图片: ${imagePath}`);
-                msg = [segment.image(imagePath)];
-            } else {
-                logger.warn(`[jm] 未找到本地图片，回退到URL模式: ${tup}`);
-                let imageUrl = `${CONFIG.public_api_url}/jmd?jm=${encodeURIComponent(tup)}`;
-                msg = [segment.image(imageUrl)];
+            // 如果没找到图片，可能是下载失败或者目录不对，或者 API 报错了
+            if (!imagePath) {
+                 // 如果之前 API 请求失败了，并且本地也没图，那就真的失败了
+                 if (!res || !res.ok) {
+                      if (res) {
+                          if (res.status === 404) {
+                              return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
+                          } else if (res.status === 503) {
+                              return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
+                          }
+                          return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
+                      } else {
+                          // fetch 抛错
+                          return await e.reply('API连接失败，请检查服务状态。');
+                      }
+                 }
+                 
+                 // 如果 API 成功了但没找到图，可能是路径问题
+                 logger.warn(`[jm] API返回成功但未找到本地图片: ${albumPath}`);
+                 return await e.reply('资源下载看似成功但未找到本地文件，请检查日志。');
             }
+
+            let msg = [segment.image(imagePath)];
+            logger.info(`[jm] 找到本地图片: ${imagePath}`);
 
             const forward = [
               '爱护jm，不要爬这么多本子，jm压力大你bot压力也大，西门',
@@ -170,16 +177,28 @@ export class ejm extends plugin {
             forward.push(msg);
             
             // 尝试获取 PDF
+            // 触发 PDF 下载/生成 (如果不存在)
+            let pdfUrl = `${CONFIG.api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
+            try {
+                // 只是触发，不等待返回内容，也不用结果
+                 fetch(pdfUrl).catch(e => logger.error(`PDF触发失败: ${e}`));
+            } catch (e) {}
+
             // 直接查找本地 PDF 文件: resources/pdf/{tup}.pdf
             const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
             let pdfToSend = null;
             
+            // 稍微等待一下 PDF 生成，如果它是第一次生成
+            // 简单的 sleep
+            await new Promise(r => setTimeout(r, 1000));
+
             if (fs.existsSync(pdfPath)) {
                  logger.info(`[jm] 找到本地PDF: ${pdfPath}`);
                  pdfToSend = pdfPath;
             } else {
-                 // 回退到 URL
-                 pdfToSend = `${CONFIG.public_api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
+                 // 如果本地没有，那可能是还在生成中，或者生成失败
+                 // 这里我们不再回退到 URL，因为 URL 肯定不通
+                 logger.warn(`[jm] 未找到本地PDF: ${pdfPath}`);
             }
             
             try {
@@ -198,11 +217,15 @@ export class ejm extends plugin {
             await e.reply(fmsg);
             
             // 单独发送 PDF 文件
-            try {
-                await e.reply(segment.file(pdfToSend));
-            } catch (err) {
-                logger.error(`发送PDF失败: ${err}`);
-                await e.reply(`PDF发送失败，请检查日志。`);
+            if (pdfToSend) {
+                try {
+                    await e.reply(segment.file(pdfToSend));
+                } catch (err) {
+                    logger.error(`发送PDF失败: ${err}`);
+                    await e.reply(`PDF发送失败，请检查日志。`);
+                }
+            } else {
+                 await e.reply(`PDF生成中或失败，请稍后重试。`);
             }
           
             
