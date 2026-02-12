@@ -3,21 +3,10 @@ import sys
 import subprocess
 import os
 
-# 依赖检查与自动安装
+# 依赖检查与自动安装 (已禁用，避免Linux权限问题)
+# 用户需手动运行 pip install -r requirements.txt
 required_packages = ['flask', 'psutil', 'python-dotenv', 'jmcomic', 'img2pdf']
-def install_package(package):
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package, "--break-system-packages"])
-        print(f"Successfully installed {package}")
-    except subprocess.CalledProcessError:
-        print(f"Failed to install {package}")
-
-for package in required_packages:
-    try:
-        __import__(package if package != 'python-dotenv' else 'dotenv')
-    except ImportError:
-        print(f"Package {package} not found. Installing...")
-        install_package(package)
+# ... (removed auto install code) ...
 
 import jmcomic
 import img2pdf
