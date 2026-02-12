@@ -53,7 +53,24 @@ export class ejm extends plugin {
             // 检查请求是否成功
         if (!res || !res.ok) {
             logger.error(`[jm] 请求失败，状态码: ${res ? res.status : '无响应'}`);
-            // ... (error handling code remains the same)
+            // 如果是连接拒绝，尝试重启
+            if (!res) {
+                await restartApi();
+                return await e.reply('API未响应，正在尝试自动重启，请稍后再试！');
+            }
+            
+            // 细分错误提示
+            if (res.status === 404) {
+                return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
+            } else if (res.status === 503) {
+                return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
+            } else if (res.status === 500) {
+                return await e.reply('服务器内部错误 (500)，请检查后台日志。');
+            } else if (res.status === 400) {
+                return await e.reply('参数错误 (400)，请输入正确的数字车号。');
+            }
+            
+            return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
         }
     
             // 发送预览图
