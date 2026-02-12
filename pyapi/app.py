@@ -10,6 +10,11 @@ import os
 
 # 检查核心依赖是否存在，如果不存在则友好提示
 try:
+    # 优先导入本地 jmcomic
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    
     import jmcomic
     import img2pdf
     from flask import Flask, request, abort, send_file
