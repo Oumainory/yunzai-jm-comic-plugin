@@ -8,7 +8,7 @@ import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
-const API_URL = 'http://127.0.0.1:5000';
+const API_URL = 'http://127.0.0.1:8000';
 
 const jm = /^#jm查(.*)$/
 const Apirun = /^#jm(启动|重启)api$/
