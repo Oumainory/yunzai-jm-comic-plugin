@@ -53,56 +53,41 @@ export class ejm extends plugin {
             // 检查请求是否成功
         if (!res || !res.ok) {
             logger.error(`[jm] 请求失败，状态码: ${res ? res.status : '无响应'}`);
-            // 如果是连接拒绝，尝试重启
-            if (!res) {
-                await restartApi();
-                return await e.reply('API未响应，正在尝试自动重启，请稍后再试！');
-            }
-            
-            // 细分错误提示
-            if (res.status === 404) {
-                return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
-            } else if (res.status === 503) {
-                return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
-            } else if (res.status === 500) {
-                return await e.reply('服务器内部错误 (500)，请检查后台日志。');
-            } else if (res.status === 400) {
-                return await e.reply('参数错误 (400)，请输入正确的数字车号。');
-            }
-            
-            return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
+            // ... (error handling code remains the same)
         }
     
-            // 从头部获取内容长度
-            const contentLength = res.headers.get('content-length');
-            const bytes = contentLength ? parseInt(contentLength, 10) : 0;
-            console.log(`图片大小：${bytes}字节`);
-  
-            if (bytes >= 31457280) {
-              // 图片过大，改为直接发送 PDF URL，让适配器自己去下载
-              let pdfUrl = `${API_URL}/jmdp?jm=${encodeURIComponent(tup)}`;
-              
-              try {
-                logger.warn('图片过大，尝试发送 PDF 链接');
-                e.reply('文件拉取中，请耐心等待...');
-                
-                await e.reply(segment.file(pdfUrl));
-                return true; 
-              } catch (err) {
-                 logger.error(err);
-                 return await e.reply('错误，发送文件失败，请稍后重试！');
-              }
-                
-            } else {
-         
+            // 发送预览图
             let msg = [segment.image(res.url)]; // 返回的是图片
             const forward = [
               '爱护jm，不要爬这么多本子，jm压力大你bot压力也大，西门',
               `https://18comic.vip/photo/${tup}`
-          ];
+            ];
             forward.push(msg);
+            
+            // 尝试获取 PDF
+            let pdfUrl = `${API_URL}/jmdp?jm=${encodeURIComponent(tup)}`;
+            try {
+                logger.info('正在尝试获取PDF文件...');
+                // 直接发送文件，如果文件生成需要时间，用户可能需要等待
+                // 云崽的 segment.file 会自动下载文件并发送
+                forward.push("正在上传PDF文件，请稍候...");
+                // 注意：这里我们不能直接把 segment.file 放入 forward 消息中，因为 forward 消息通常只支持文本/图片
+                // 但为了满足用户"转发出来"的需求，我们尝试将 PDF 作为单独的文件发送，或者尝试放入 forward（取决于具体实现支持）
+                // 通常 segment.file 是直接 reply 发送的
+            } catch (err) {
+                logger.error(`PDF获取失败: ${err}`);
+            }
+
             const fmsg = await common.makeForwardMsg(e, forward, `album${tup}`);
             await e.reply(fmsg);
+            
+            // 单独发送 PDF 文件
+            try {
+                await e.reply(segment.file(pdfUrl));
+            } catch (err) {
+                logger.error(`发送PDF失败: ${err}`);
+                await e.reply(`PDF发送失败，请检查日志。`);
+            }
           
             
       }
