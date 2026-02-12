@@ -107,7 +107,6 @@ export class ejm extends plugin {
             }
           
             
-      }
             // 不需要再返回 true，因为已经回复了
             // return true; // 返回 true，阻挡消息不再往下
             } catch (err) {
