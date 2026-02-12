@@ -28,7 +28,11 @@
 1.  **克隆插件**  
     将本项目克隆到 Yunzai-Bot 的 `plugins` 目录下：
     ```bash
+    # Github源
     git clone https://github.com/Oumainory/yunzai-jm-comic-plugin.git ./plugins/yz-jmcomic-plugin
+    
+    # 或者 Gitee源 (国内推荐)
+    git clone https://gitee.com/OumaInory_0/yunzai-jm-comic-plugin.git ./plugins/yz-jmcomic-plugin
     ```
 
 2.  **安装 Python 依赖 (手动安装)**  
