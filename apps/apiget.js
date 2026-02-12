@@ -152,6 +152,17 @@ export class ejm extends plugin {
               stdio: [ 'ignore', out, err ]
           });
 
+          subprocess.on('error', (err) => {
+              console.error('启动 Python 失败:', err);
+              // 如果启动失败，可能是依赖未安装
+              if (err.code === 'ENOENT' && process.platform !== 'win32') {
+                  console.log('尝试自动安装依赖...');
+                  // 这里不直接自动安装，因为可能会有权限问题，而是提示用户
+                  // 或者可以尝试在 run.log 中写入提示
+                  fs.writeSync(out, `\n[Auto-Check] 启动失败，可能是环境问题。请尝试手动运行: pip3 install -r ${path.join(JM_PATH, 'pyapi', 'requirements.txt')}\n`);
+              }
+          });
+
           subprocess.unref();
           console.log('Python后端已尝试启动，日志已重定向到 run.log');
       }
