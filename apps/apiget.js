@@ -1,50 +1,362 @@
 import common from "../../../lib/common/common.js";
 import plugin from '../../../lib/plugins/plugin.js';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawn, execFileSync } from 'node:child_process';
 import fetch from 'node-fetch';
-import fs from 'fs';
+import fs from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
+const pyapiDir = path.join(pluginRoot, 'pyapi');
+const appScript = path.join(pyapiDir, 'app.py');
+const pidFile = path.join(pyapiDir, 'app.pid');
+const logFile = path.join(pyapiDir, 'run.log');
+const CONFIG_FILE = path.join(pluginRoot, 'config', 'config.json');
 
-// 默认配置
-let CONFIG = {
+const DEFAULT_CONFIG = {
     api_url: 'http://127.0.0.1:8000',
-    public_api_url: 'http://127.0.0.1:8000' // 新增：用于发送给QQ适配器的地址
+    public_api_url: 'http://127.0.0.1:8000',
+    max_pdf_mb: 80,
+    auto_start: true,
+    auto_check: false,
+    health_check_interval_ms: 60000,
+    request_timeout_ms: 300000
 };
 
-// 加载配置
-const CONFIG_FILE = path.join(pluginRoot, 'config', 'config.json');
-if (fs.existsSync(CONFIG_FILE)) {
+function loadConfig() {
     try {
-        const userConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
-        CONFIG = { ...CONFIG, ...userConfig };
-        // 如果用户只配了 api_url 没配 public_api_url，默认两者一致
+        if (!fs.existsSync(CONFIG_FILE)) return { ...DEFAULT_CONFIG };
+        const userConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        const config = { ...DEFAULT_CONFIG, ...userConfig };
         if (userConfig.api_url && !userConfig.public_api_url) {
-            CONFIG.public_api_url = userConfig.api_url;
+            config.public_api_url = userConfig.api_url;
         }
-    } catch (e) {
-        console.error('加载配置文件失败:', e);
+        return config;
+    } catch (error) {
+        console.error('[jm] 加载配置文件失败，使用默认配置:', error);
+        return { ...DEFAULT_CONFIG };
     }
-} else {
-    // 自动创建默认配置文件
-    const configDir = path.dirname(CONFIG_FILE);
-    if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true });
-    }
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 4));
 }
 
-const API_URL = CONFIG.api_url;
-const PUBLIC_API_URL = CONFIG.public_api_url;
+let CONFIG = loadConfig();
+let startPromise = null;
+let healthTimer = null;
 
-const jm = /^#jm查(.*)$/
-const Apirun = /^#jm(启动|重启)api$/
-const Apitimerestart = /^#jm定时检查$/
-const Apirestart = /^#jm检查api$/
-const SetApiUrl = /^#jm设置api地址(.*)$/
+function saveConfig() {
+    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true });
+    fs.writeFileSync(CONFIG_FILE, `${JSON.stringify(CONFIG, null, 4)}\n`, 'utf8');
+}
+
+function apiBase() {
+    return String(CONFIG.api_url || DEFAULT_CONFIG.api_url).replace(/\/+$/, '');
+}
+
+function requestTimeoutMs() {
+    const timeout = Number(CONFIG.request_timeout_ms);
+    return Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.request_timeout_ms;
+}
+
+async function fetchWithTimeout(url, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function checkApiHealth(timeoutMs = 2000) {
+    try {
+        const healthResponse = await fetchWithTimeout(`${apiBase()}/health`, timeoutMs);
+        if (healthResponse.ok) {
+            let data = null;
+            try {
+                data = await healthResponse.json();
+            } catch (_) {
+                // 新版健康接口必须返回 JSON。
+            }
+            if (data?.ok === true) {
+                return { ok: true, status: healthResponse.status, data, legacy: false };
+            }
+            return { ok: false, status: healthResponse.status, error: '健康接口未返回 ok=true' };
+        }
+
+        if (![404, 405].includes(healthResponse.status)) {
+            await healthResponse.text().catch(() => '');
+            return { ok: false, status: healthResponse.status, error: `HTTP ${healthResponse.status}` };
+        }
+
+        await healthResponse.text().catch(() => '');
+        const legacyResponse = await fetchWithTimeout(`${apiBase()}/`, timeoutMs);
+        if (legacyResponse.ok) {
+            const body = (await legacyResponse.text()).trim();
+            if (body === 'api running!') {
+                return { ok: true, status: legacyResponse.status, legacy: true };
+            }
+            return { ok: false, status: legacyResponse.status, error: '旧版健康接口响应不匹配' };
+        }
+        return { ok: false, status: legacyResponse.status, error: `HTTP ${legacyResponse.status}` };
+    } catch (error) {
+        return { ok: false, error: error.name === 'AbortError' ? '健康检查超时' : error.message };
+    }
+}
+
+function normalizePath(value) {
+    const normalized = path.normalize(String(value)).replace(/\\/g, '/');
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function processInfo(pid) {
+    if (process.platform === 'win32') {
+        try {
+            const commandLine = execFileSync('powershell.exe', [
+                '-NoProfile', '-Command',
+                `(Get-CimInstance Win32_Process -Filter "ProcessId = ${Number(pid)}").CommandLine`
+            ], { encoding: 'utf8', timeout: 3000 }).trim();
+            return { commandLine, cwd: null };
+        } catch (_) {
+            return null;
+        }
+    }
+
+    try {
+        const procDir = `/proc/${Number(pid)}`;
+        const commandLine = fs.readFileSync(path.join(procDir, 'cmdline'), 'utf8').replace(/\0/g, ' ').trim();
+        let cwd = null;
+        try {
+            cwd = fs.realpathSync(path.join(procDir, 'cwd'));
+        } catch (_) {
+            // 有些系统会限制读取 cwd；绝对脚本路径仍可用于识别。
+        }
+        return { commandLine, cwd };
+    } catch (_) {
+        return null;
+    }
+}
+
+function isPluginApiProcess(pid) {
+    const info = processInfo(pid);
+    if (!info?.commandLine) return false;
+
+    const firstToken = info.commandLine.match(/^"([^"]+)"|^(\S+)/)?.slice(1).find(Boolean) || '';
+    const executable = firstToken.replace(/\\/g, '/').split('/').pop();
+    if (!/^python(?:3(?:\.\d+)?)?(?:\.exe)?$/i.test(executable)) return false;
+
+    const commandLine = normalizePath(info.commandLine);
+    const expectedScript = normalizePath(appScript);
+    const expectedCwd = normalizePath(pyapiDir);
+    const cwd = info.cwd ? normalizePath(info.cwd) : '';
+    const hasAbsoluteScript = commandLine.includes(expectedScript);
+    const hasRelativeScript = cwd === expectedCwd && /(?:^|\s|["'])app\.py(?:\s|$|["'])/i.test(info.commandLine);
+    return hasAbsoluteScript || hasRelativeScript;
+}
+
+function pidsOnPort(port) {
+    const pids = new Set();
+    const commands = process.platform === 'win32'
+        ? [['netstat.exe', ['-ano', '-p', 'tcp']]]
+        : [['ss', ['-ltnp']], ['netstat', ['-ltnp']]];
+
+    for (const [command, args] of commands) {
+        try {
+            const output = execFileSync(command, args, { encoding: 'utf8', timeout: 3000 });
+            for (const line of output.split(/\r?\n/)) {
+                const fields = line.trim().split(/\s+/);
+                if (!fields.some(field => field.replace(/^\[/, '').replace(/\]$/, '').endsWith(`:${port}`))) continue;
+                if (process.platform === 'win32' && !line.includes('LISTENING')) continue;
+                for (const match of line.matchAll(/pid=(\d+)/g)) pids.add(Number(match[1]));
+                if (process.platform === 'win32') {
+                    const last = fields.at(-1);
+                    if (/^\d+$/.test(last || '')) pids.add(Number(last));
+                }
+            }
+            if (pids.size || command === 'netstat.exe') break;
+        } catch (_) {
+            // 继续尝试下一个系统命令。
+        }
+    }
+    return [...pids].filter(pid => Number.isInteger(pid) && pid > 0);
+}
+
+function pluginApiPids() {
+    const pids = new Set();
+    try {
+        const pid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+        if (Number.isInteger(pid) && pid > 0 && isPluginApiProcess(pid)) pids.add(pid);
+    } catch (_) {
+        // pid 文件缺失或过期时继续通过监听端口查找。
+    }
+
+    let port = 8000;
+    try {
+        port = Number(new URL(apiBase()).port || (new URL(apiBase()).protocol === 'https:' ? 443 : 80));
+    } catch (_) {
+        // 配置地址不合法时使用默认端口，仅用于定位本插件进程。
+    }
+    for (const pid of pidsOnPort(port)) {
+        if (isPluginApiProcess(pid)) pids.add(pid);
+    }
+    return [...pids];
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function stopPluginApi() {
+    const pids = pluginApiPids();
+    if (!pids.length) return { stopped: 0 };
+
+    for (const pid of pids) {
+        try {
+            process.kill(pid, 'SIGTERM');
+        } catch (error) {
+            if (error.code !== 'ESRCH') logger.warn(`[jm] 无法停止本插件 API 进程 PID=${pid}: ${error.message}`);
+        }
+    }
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && pids.some(pid => isPluginApiProcess(pid))) await sleep(200);
+    for (const pid of pids) {
+        if (!isPluginApiProcess(pid)) continue;
+        try {
+            process.kill(pid, 'SIGKILL');
+        } catch (error) {
+            if (error.code !== 'ESRCH') logger.warn(`[jm] 无法强制停止本插件 API 进程 PID=${pid}: ${error.message}`);
+        }
+    }
+
+    try {
+        const recordedPid = Number(fs.readFileSync(pidFile, 'utf8').trim());
+        if (pids.includes(recordedPid)) fs.unlinkSync(pidFile);
+    } catch (_) {
+        // 进程退出时 Python 也会清理 pid 文件。
+    }
+    return { stopped: pids.length };
+}
+
+function pythonCommand() {
+    const venvPython = process.platform === 'win32'
+        ? path.join(pluginRoot, '.venv', 'Scripts', 'python.exe')
+        : path.join(pluginRoot, '.venv', 'bin', 'python');
+    if (fs.existsSync(venvPython)) return { command: venvPython, fallback: false };
+
+    const fallback = 'python3';
+    logger.warn(`[jm] 未找到插件虚拟环境解释器 ${venvPython}，回退使用 ${fallback}`);
+    return { command: fallback, fallback: true };
+}
+
+async function startApiProcess() {
+    if (!fs.existsSync(appScript)) throw new Error(`找不到后端脚本：${appScript}`);
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    const { command, fallback } = pythonCommand();
+    const stdout = fs.openSync(logFile, 'a');
+    const stderr = fs.openSync(logFile, 'a');
+
+    try {
+        const child = spawn(command, [appScript], {
+            cwd: pyapiDir,
+            detached: process.platform !== 'win32',
+            stdio: ['ignore', stdout, stderr],
+            windowsHide: true
+        });
+        const pid = await new Promise((resolve, reject) => {
+            child.once('spawn', () => resolve(child.pid));
+            child.once('error', reject);
+        });
+        child.on('error', error => logger.error(`[jm] Python 后端进程异常: ${error.message}`));
+        child.unref();
+        fs.writeFileSync(pidFile, `${pid}\n`, 'utf8');
+        logger.info(`[jm] Python 后端已启动 PID=${pid}${fallback ? '（系统 Python 回退）' : '（虚拟环境）'}，日志：${logFile}`);
+        return pid;
+    } finally {
+        fs.closeSync(stdout);
+        fs.closeSync(stderr);
+    }
+}
+
+async function waitForApi(timeoutMs = 30000) {
+    const deadline = Date.now() + timeoutMs;
+    let last = { ok: false, error: '服务尚未响应' };
+    while (Date.now() < deadline) {
+        last = await checkApiHealth(2000);
+        if (last.ok) return last;
+        await sleep(750);
+    }
+    return last;
+}
+
+async function ensureApiRunning() {
+    if (startPromise) return startPromise;
+    startPromise = (async () => {
+        const health = await checkApiHealth();
+        if (health.ok) return { ...health, started: false };
+
+        const existingPids = pluginApiPids();
+        if (existingPids.length) {
+            const recovered = await waitForApi(30000);
+            if (recovered.ok) return { ...recovered, started: false };
+            throw new Error(`检测到本插件 API 进程仍在运行但健康检查未通过（${recovered.error || '超时'}），请使用 #jm重启api；日志：${logFile}`);
+        }
+
+        await startApiProcess();
+        const ready = await waitForApi(30000);
+        if (!ready.ok) throw new Error(`等待 API 健康检查超时（${ready.error || '无响应'}），请查看 ${logFile}`);
+        return { ...ready, started: true };
+    })().finally(() => {
+        startPromise = null;
+    });
+    return startPromise;
+}
+
+async function restartApi() {
+    if (startPromise) {
+        try { await startPromise; } catch (_) { /* 重启流程继续执行 */ }
+    }
+    await stopPluginApi();
+    startPromise = null;
+    return ensureApiRunning();
+}
+
+async function checkTask(e = null) {
+    const health = await checkApiHealth();
+    if (health.ok) {
+        const message = `API运行正常（HTTP ${health.status}${health.legacy ? '，兼容旧接口' : ''}）`;
+        if (e) await e.reply(message);
+        return true;
+    }
+
+    try {
+        const result = await ensureApiRunning();
+        const message = `API原先未响应，已${result.started ? '启动' : '确认恢复'}成功（HTTP ${result.status}）`;
+        if (e) await e.reply(message);
+        return true;
+    } catch (error) {
+        const message = `API未运行，自动启动失败：${error.message}\n可使用 #jm启动api 重试；日志：${logFile}`;
+        if (e) await e.reply(message);
+        else logger.error(`[jm] ${message}`);
+        return false;
+    }
+}
+
+function startHealthTimer() {
+    if (healthTimer) return false;
+    const interval = Number(CONFIG.health_check_interval_ms);
+    const intervalMs = Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_CONFIG.health_check_interval_ms;
+    healthTimer = setInterval(() => {
+        checkTask().catch(error => logger.error(`[jm] 定时巡检失败: ${error.message}`));
+    }, intervalMs);
+    healthTimer.unref?.();
+    return true;
+}
+
+const jm = /^#jm查(.*)$/;
+const Apirun = /^#jm(启动|重启)api$/;
+const Apitimerestart = /^#jm定时检查$/;
+const Apirestart = /^#jm检查api$/;
+const SetApiUrl = /^#jm设置api地址(.*)$/;
 
 export class ejm extends plugin {
     constructor() {
@@ -53,302 +365,154 @@ export class ejm extends plugin {
             dsc: 'jmsearch',
             event: 'message',
             priority: 1,
-            rule: [{
-                    reg: jm,
-                    fnc: "Jm"
-                },{
-                    reg: Apirun,
-                    fnc: "apirun",
-                    permission: "master"
-                },{
-                    reg: Apitimerestart,
-                    fnc: "apitimerestart",
-                    permission: "master"
-                },{
-                    reg: Apirestart,
-                    fnc: "apirestart",
-                },{
-                    reg: SetApiUrl,
-                    fnc: "setApiUrl",
-                    permission: "master"
-                }
+            rule: [
+                { reg: jm, fnc: 'Jm' },
+                { reg: Apirun, fnc: 'apirun', permission: 'master' },
+                { reg: Apitimerestart, fnc: 'apitimerestart', permission: 'master' },
+                { reg: Apirestart, fnc: 'apirestart' },
+                { reg: SetApiUrl, fnc: 'setApiUrl', permission: 'master' }
             ]
-        }
-        )
+        });
     }
 
     async setApiUrl(e) {
-        let url = e.msg.replace(/#jm设置api地址/g, "").trim();
+        let url = e.msg.replace(/#jm设置api地址/g, '').trim();
         if (!url) {
-            return e.reply(`当前配置:\n内部API: ${CONFIG.api_url}\n外部API: ${CONFIG.public_api_url}\n\n请发送: #jm设置api地址 http://IP:PORT`);
+            return e.reply(`当前配置：\n内部 API：${CONFIG.api_url}\n外部 API：${CONFIG.public_api_url}\n\n请发送：#jm设置api地址 http://IP:PORT`);
         }
-        
-        // 简单校验
-        if (!url.startsWith('http')) {
-            url = 'http://' + url;
-        }
-        
-        // 更新配置
-        CONFIG.api_url = url;
-        CONFIG.public_api_url = url; // 默认同时修改两者
-        
+        if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
         try {
-            fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 4));
-            // 提示用户重启生效，或者这里其实已经是热更了（对于新请求）
-            // 但是 API_URL 和 PUBLIC_API_URL 是 const，需要改成 let 或者直接使用 CONFIG.xxx
-            // 由于上面用的是 const，这里实际上不会立即生效，除非重启插件
-            // 所以我们修改代码结构，不再使用 const API_URL
-            return e.reply(`API地址已更新为: ${url}\n请重启Bot或重载插件生效！`);
-        } catch (err) {
-            return e.reply(`保存配置失败: ${err}`);
+            const parsed = new URL(url);
+            if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('仅支持 http 或 https 地址');
+            CONFIG.api_url = url.replace(/\/+$/, '');
+            CONFIG.public_api_url = CONFIG.api_url;
+            saveConfig();
+            return e.reply(`API地址已热更新为：${CONFIG.api_url}`);
+        } catch (error) {
+            return e.reply(`API地址无效：${error.message}`);
         }
     }
-      async Jm(e) {
-        let tup = e.msg.replace(/#jm查/g, "").trim();
-    
-        // 构造请求URL
-        let url = `${CONFIG.api_url}/jmd?jm=${encodeURIComponent(tup)}`;
-    
-        try {
-            // 发起请求，触发 Python 下载
-            // 使用 try-catch 忽略 fetch 错误，因为我们主要依赖本地文件
-            let res;
-            try {
-                // 设置超时，避免请求卡住
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 10000); // 10秒超时
-                res = await fetch(url, { signal: controller.signal });
-                clearTimeout(timeoutId);
-            } catch (err) {
-                 logger.error(`[jm] 触发下载API失败: ${err}`);
-            }
 
-            // 查找本地图片文件
-            // Python下载的目录结构: resources/long/{tup}/...
-            // 找到第一张图片
-            const albumPath = path.join(pluginRoot, 'resources', 'long', tup);
-            let imagePath = null;
-            
-            // 循环检测文件是否存在，最多等待 15 秒
-            // 这是为了等待 Python 后台下载完成
-            let maxRetries = 15; 
-            while (maxRetries > 0) {
-                if (fs.existsSync(albumPath) && fs.lstatSync(albumPath).isDirectory()) {
-                    const files = fs.readdirSync(albumPath).sort();
-                    for (const file of files) {
-                        if (file.match(/\.(png|jpg|jpeg|webp|gif)$/i)) {
-                            imagePath = path.join(albumPath, file);
-                            break;
-                        }
-                    }
-                    if (imagePath) break; // 找到了，跳出循环
-                }
-                
-                // 如果 API 返回了明确的错误（如 404），则不再等待
-                if (res && !res.ok && res.status !== 503) { // 503可能是下载失败，可以再等等看有没有残留文件？或者直接退出
-                     break; 
-                }
-
-                await new Promise(r => setTimeout(r, 1000)); // 等待 1 秒
-                maxRetries--;
-            }
-
-            // 如果没找到图片
-            if (!imagePath) {
-                 if (res) {
-                      if (res.status === 404) {
-                          return await e.reply('未找到该资源 (404)，请检查车号是否正确，或该本子已被删除。');
-                      } else if (res.status === 503) {
-                          return await e.reply('下载失败 (503)，可能是网络连接问题或IP被封禁，请稍后重试。');
-                      } else if (!res.ok) {
-                          return await e.reply(`请求失败 (Code: ${res.status})，请检查车号或稍后重试！`);
-                      }
-                 }
-                 // API 没响应或者响应成功但没文件
-                 logger.warn(`[jm] 未找到本地图片: ${albumPath}`);
-                 return await e.reply('资源下载超时或失败，请稍后重试。');
-            }
-
-            let msg = [segment.image(imagePath)];
-            logger.info(`[jm] 找到本地图片: ${imagePath}`);
-
-            const forward = [
-              '爱护jm，不要爬这么多本子，jm压力大你bot压力也大，西门',
-              `https://18comic.vip/photo/${tup}`
-            ];
-            forward.push(msg);
-            
-            // 尝试获取 PDF
-            // 触发 PDF 下载/生成
-            let pdfUrl = `${CONFIG.api_url}/jmdp?jm=${encodeURIComponent(tup)}`;
-            try {
-                 // 使用带超时的 fetch
-                 const controller = new AbortController();
-                 const timeoutId = setTimeout(() => controller.abort(), 10000); 
-                 fetch(pdfUrl, { signal: controller.signal }).catch(e => logger.error(`PDF触发失败: ${e}`));
-                 clearTimeout(timeoutId); // 这里其实有点问题，因为 fetch 是异步的且没 await，timeout 可能无效，但 catch 能捕获
-            } catch (e) {}
-
-            // 直接查找本地 PDF 文件: resources/pdf/{tup}.pdf
-            const pdfPath = path.join(pluginRoot, 'resources', 'pdf', `${tup}.pdf`);
-            let pdfToSend = null;
-            
-            // 等待 PDF 生成，最多等待 20 秒
-            let pdfRetries = 20;
-            while (pdfRetries > 0) {
-                 if (fs.existsSync(pdfPath)) {
-                      logger.info(`[jm] 找到本地PDF: ${pdfPath}`);
-                      pdfToSend = pdfPath;
-                      break;
-                 }
-                 await new Promise(r => setTimeout(r, 1000));
-                 pdfRetries--;
-            }
-
-            if (!pdfToSend) {
-                 logger.warn(`[jm] 未找到本地PDF (超时): ${pdfPath}`);
-            }
-            
-            try {
-                logger.info('正在尝试获取PDF文件...');
-                // 直接发送文件，如果文件生成需要时间，用户可能需要等待
-                // 云崽的 segment.file 会自动下载文件并发送
-                forward.push("正在上传PDF文件，请稍候...");
-                // 注意：这里我们不能直接把 segment.file 放入 forward 消息中，因为 forward 消息通常只支持文本/图片
-                // 但为了满足用户"转发出来"的需求，我们尝试将 PDF 作为单独的文件发送，或者尝试放入 forward（取决于具体实现支持）
-                // 通常 segment.file 是直接 reply 发送的
-            } catch (err) {
-                logger.error(`PDF获取失败: ${err}`);
-            }
-
-            const fmsg = await common.makeForwardMsg(e, forward, `album${tup}`);
-            
-            // 发送合并转发消息时捕获错误
-            try {
-                await e.reply(fmsg);
-            } catch (err) {
-                logger.error(`发送合并转发消息失败: ${err}`);
-                // 如果是 OneBot 适配器的 bug，这里可能会报错但其实发不出去
-                // 继续尝试发送 PDF
-            }
-            
-            // 单独发送 PDF 文件
-            if (pdfToSend) {
-                try {
-                    // 使用 file:// 协议明确告知这是一个本地文件路径
-                    // 注意：Windows下路径可能需要特殊处理，但 node 的 path 模块通常处理得很好
-                    // 最好转换为 URL 格式
-                    const fileUrl = `file://${pdfPath}`;
-                    await e.reply(segment.file(fileUrl));
-                } catch (err) {
-                    logger.error(`发送PDF失败: ${err}`);
-                    // 尝试不带 file:// 协议再次发送（有些适配器可能只认绝对路径）
-                    try {
-                        await e.reply(segment.file(pdfPath));
-                    } catch (err2) {
-                        logger.error(`重试发送PDF失败: ${err2}`);
-                        await e.reply(`PDF发送失败，请检查日志。`);
-                    }
-                }
-            } else {
-                 await e.reply(`PDF生成中或失败，请稍后重试。`);
-            }
-          
-            
-            // 不需要再返回 true，因为已经回复了
-            // return true; // 返回 true，阻挡消息不再往下
-            } catch (err) {
-            logger.error(`[jm] 请求失败：${err}`);
-            
-            // 捕获 fetch 抛出的网络错误（如连接拒绝）
-            if (err.code === 'ECONNREFUSED' || err.type === 'system') {
-                logger.warn('检测到API连接拒绝，触发自动重启');
-                await restartApi();
-                return await e.reply('API服务未启动或已停止，正在为您重启，请约10秒后重试！');
-            }
-            
-            return await e.reply('请求失败，请检查车号或稍后重试！');
+    async Jm(e) {
+        const rawJmId = e.msg.replace(/#jm查/g, '').trim();
+        if (!/^\d+$/.test(rawJmId) || !Number.isSafeInteger(Number(rawJmId)) || Number(rawJmId) <= 0) {
+            return e.reply('车号必须是正整数。用法：#jm查 <车号>');
         }
+        const jmId = String(Number(rawJmId));
+
+        await e.reply(`正在获取 车号 ${jmId}，请稍候`);
+        const initialHealth = await checkApiHealth();
+        if (!initialHealth.ok) {
+            try {
+                await ensureApiRunning();
+            } catch (error) {
+                return e.reply(`API未能启动：${error.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
             }
-
-      async apirun(e){
-        await restartApi();
-        await e.reply('api启动完成！检查日志吧')
-        return true
         }
-      async apitimerestart(e){
-        // 立即执行一次，然后每分钟执行
-        checkTask();
-        setInterval(checkTask, 60000);
-        return await e.reply('设定完成，重启后失效')
-      }
-      async apirestart(e){
-        return await checkTask(e);
-      }
-        
-      }
-  
-      async function restartApi() {
-          const JM_PATH = pluginRoot;
-          console.log(`获取工作路径:${JM_PATH}`);
-          const ppp = path.join(JM_PATH, 'pyapi', 'app.py');
-          const logFile = path.join(JM_PATH, 'pyapi', 'run.log');
-          console.log(`Python脚本路径: ${ppp}`);
-          console.log(`日志文件路径: ${logFile}`);
 
-          const out = fs.openSync(logFile, 'a');
-          const err = fs.openSync(logFile, 'a');
-
-          // 在 Linux 下优先使用 /usr/bin/python3，Windows 下使用 python
-          let pythonCommand = 'python';
-          if (process.platform !== 'win32') {
-              if (fs.existsSync('/usr/bin/python3')) {
-                  pythonCommand = '/usr/bin/python3';
-              } else {
-                  pythonCommand = 'python3';
-              }
-          }
-          
-          const subprocess = spawn(pythonCommand, [ppp], {
-              detached: true,
-              stdio: [ 'ignore', out, err ]
-          });
-
-          subprocess.on('error', (err) => {
-              console.error('启动 Python 失败:', err);
-              // 如果启动失败，可能是依赖未安装
-              if (err.code === 'ENOENT' && process.platform !== 'win32') {
-                  console.log('尝试自动安装依赖...');
-                  // 这里不直接自动安装，因为可能会有权限问题，而是提示用户
-                  // 或者可以尝试在 run.log 中写入提示
-                  fs.writeSync(out, `\n[Auto-Check] 启动失败，可能是环境问题。请尝试手动运行: pip3 install -r ${path.join(JM_PATH, 'pyapi', 'requirements.txt')}\n`);
-              }
-          });
-
-          subprocess.unref();
-          console.log('Python后端已尝试启动，日志已重定向到 run.log');
-      }
-
-      async function checkTask(e = null) {
+        let response;
+        let result;
         try {
-          console.log('执行检查，时间:', new Date().toLocaleTimeString());
-          let url = CONFIG.api_url;
-          let res = await fetch(url);
-          console.log(`当前状态：${res.status}`)
-          if(e) e.reply(`当前状态：${res.status}`)
-          return true
+            const url = `${apiBase()}/album?jm=${encodeURIComponent(jmId)}`;
+            response = await fetchWithTimeout(url, requestTimeoutMs());
         } catch (error) {
-          console.error('检查任务出错:', error);
-          
-          // 如果是连接被拒绝（服务挂了），则尝试重启
-          if (error.code === 'ECONNREFUSED' || error.type === 'system') {
-              console.warn('API连接失败，执行重启');
-              if(e) e.reply('api未启动或意外关闭，正在尝试重启...')
-              await restartApi();
-          } else {
-              if(e) e.reply(`检查失败: ${error.message}`);
-          }
+            if (error.name === 'AbortError') {
+                return e.reply(`获取车号 ${jmId} 超时（${Math.round(requestTimeoutMs() / 1000)} 秒），下载可能仍在进行，请稍后重试。`);
+            }
+            logger.error(`[jm] 请求车号 ${jmId} 失败: ${error.message}`);
+            try {
+                await ensureApiRunning();
+                return e.reply('连接 API 失败，已检查并尝试恢复服务，请稍后重试。');
+            } catch (startError) {
+                return e.reply(`连接 API 失败且自动启动未成功：${startError.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
+            }
         }
-      }
 
-  
+        try {
+            result = await response.json();
+        } catch (_) {
+            return e.reply(`API返回了无法识别的数据（HTTP ${response.status}），请检查后端日志。`);
+        }
+
+        if (!response.ok || result?.ok !== true) {
+            const errorText = result?.error || '后端未提供错误信息';
+            if (response.status === 400) return e.reply(`车号参数无效：${errorText}`);
+            if (response.status === 404) return e.reply(`未找到车号 ${jmId} 的资源：${errorText}`);
+            if (response.status === 503) return e.reply(`车号 ${jmId} 获取失败，后端暂时不可用：${errorText}。请稍后重试。`);
+            if (response.status === 500) return e.reply(`车号 ${jmId} 处理失败：${errorText}。请查看后端日志。`);
+            return e.reply(`获取车号 ${jmId} 失败（HTTP ${response.status}）：${errorText}`);
+        }
+
+        const coverPath = result.cover_path;
+        const pdfPath = result.pdf_path;
+        if (!coverPath || !pdfPath || !fs.existsSync(coverPath) || !fs.existsSync(pdfPath)) {
+            logger.error(`[jm] API 返回的文件不存在，车号=${jmId}，cover=${coverPath}，pdf=${pdfPath}`);
+            return e.reply('后端返回成功，但本地封面或 PDF 文件不存在，请检查 pyapi/run.log。');
+        }
+
+        const forward = await common.makeForwardMsg(e, [
+            `车号 ${jmId}，共 ${result.page_count} 页。`,
+            [segment.image(pathToFileURL(path.resolve(coverPath)).href)]
+        ], `album${jmId}`);
+        try {
+            await e.reply(forward);
+        } catch (error) {
+            logger.error(`[jm] 发送封面转发失败: ${error.message}`);
+            return e.reply(`车号 ${jmId} 已获取，但发送封面失败：${error.message}`);
+        }
+
+        const maxPdfMb = Number(CONFIG.max_pdf_mb);
+        const maxBytes = (Number.isFinite(maxPdfMb) && maxPdfMb > 0 ? maxPdfMb : DEFAULT_CONFIG.max_pdf_mb) * 1024 * 1024;
+        const pdfSize = Number(result.pdf_size);
+        if (!Number.isFinite(pdfSize) || pdfSize <= 0) {
+            return e.reply(`车号 ${jmId} 的 PDF 体积信息无效，未发送文件。`);
+        }
+        if (Number.isFinite(pdfSize) && pdfSize > maxBytes) {
+            const sizeMb = (pdfSize / 1024 / 1024).toFixed(2);
+            const limitMb = (maxBytes / 1024 / 1024).toFixed(2);
+            return e.reply(`车号 ${jmId} 的 PDF 为 ${sizeMb} MB，超过发送上限 ${limitMb} MB；封面已发送，PDF 未发送。`);
+        }
+
+        try {
+            await e.reply(segment.file(pathToFileURL(path.resolve(pdfPath)).href, `${jmId}.pdf`));
+        } catch (error) {
+            logger.error(`[jm] 发送车号 ${jmId} PDF 失败: ${error.message}`);
+            return e.reply(`车号 ${jmId} 的封面已发送，但 PDF 发送失败：${error.message}`);
+        }
+    }
+
+    async apirun(e) {
+        try {
+            const restarting = e.msg.includes('重启');
+            const result = restarting ? await restartApi() : await ensureApiRunning();
+            await e.reply(`API${restarting ? '重启' : '启动'}成功（HTTP ${result.status}）。`);
+        } catch (error) {
+            await e.reply(`API${e.msg.includes('重启') ? '重启' : '启动'}失败：${error.message}\n请查看 ${logFile}。`);
+        }
+        return true;
+    }
+
+    async apitimerestart(e) {
+        CONFIG.auto_check = true;
+        try {
+            saveConfig();
+            const alreadyRunning = !startHealthTimer();
+            return e.reply(alreadyRunning ? '定时巡检已在运行，不会重复创建。' : '已开启定时巡检，重启插件后会自动恢复。');
+        } catch (error) {
+            return e.reply(`保存巡检配置失败：${error.message}`);
+        }
+    }
+
+    async apirestart(e) {
+        return checkTask(e);
+    }
+}
+
+if (CONFIG.auto_check === true) startHealthTimer();
+if (CONFIG.auto_start !== false) {
+    setTimeout(() => {
+        ensureApiRunning()
+            .then(result => logger.info(`[jm] 自动启动检查完成：API运行正常（HTTP ${result.status}）`))
+            .catch(error => logger.error(`[jm] 自动启动 API 失败：${error.message}`));
+    }, 0).unref?.();
+}

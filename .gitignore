@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+pyapi/.env
+pyapi/get-pip.py
+pyapi/*.log
+pyapi/app.pid
+resources/app.log
+resources/long/*
+!resources/long/none.txt
+resources/pdf/*.pdf

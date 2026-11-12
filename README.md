@@ -35,20 +35,22 @@
     git clone https://gitee.com/OumaInory_0/yunzai-jm-comic-plugin.git ./plugins/yz-jmcomic-plugin
     ```
 
-2.  **安装 Python 依赖 (手动安装)**  
-    进入插件的 `pyapi` 目录，并安装所需的 Python 库。
-    > **注意**：如果不运行此步骤，插件将无法启动。如果遇到权限问题，请在命令后加 `--break-system-packages` 或使用虚拟环境。
+2.  **创建虚拟环境并安装 Python 依赖**  
+    在插件根目录创建 `.venv`，再使用虚拟环境内的 pip 安装依赖：
     ```bash
-    cd plugins/yz-jmcomic-plugin/pyapi
-    pip3 install -r requirements.txt
+    cd plugins/yz-jmcomic-plugin
+    python3 -m venv .venv
+    .venv/bin/pip install -r pyapi/requirements.txt
     ```
-    *(如果报错缺少模块，请务必执行上述命令)*
+    Windows 可使用 `py -m venv .venv`，然后运行 `.venv\Scripts\pip.exe install -r pyapi\requirements.txt`。
 
 3.  **配置选项**  
     检查 `pyapi/option.yml` 配置文件。虽然插件支持开箱即用（免配置），但建议您确认下载路径等设置符合您的需求。
 
 4.  **启动 Bot**  
-    启动 Yunzai-Bot，插件会自动唤醒 Python 后端服务，无需手动运行 Python 脚本。
+    启动 Yunzai-Bot 后，插件会自动检查并拉起 Python 后端；已运行的后端不会重复启动。
+
+PDF 默认发送上限为 **80 MB**，可在 `config/config.json` 修改 `max_pdf_mb`。`request_timeout_ms` 默认是 300000（5 分钟）；`auto_start` 控制载入插件时是否启动 API，`auto_check` 可开启自动巡检。
 
 ## 🎮 食用方法 (Usage)
 
@@ -65,9 +67,10 @@
 | `#jm启动api` | 手动启动 Python 后端服务 |
 | `#jm重启api` | 重启 Python 后端服务 |
 | `#jm检查api` | 检查后端服务运行状态 |
-| `#jm定时检查` | 开启服务存活定时检测（每分钟） |
-| `#jm安装依赖` | 尝试自动安装 Python 依赖 |
-| `#jm路径写入` | 自动配置环境变量路径 |
+| `#jm定时检查` | 开启定时巡检，设置会保存并在插件载入时恢复 |
+| `#jm安装依赖` | 在插件 `.venv` 中创建环境并安装 Python 依赖 |
+| `#jm路径写入` | 写入资源目录、监听地址和端口等环境变量 |
+| `#jm设置api地址 <地址>` | 热更新内部和外部 API 地址 |
 
 ## 🏗️ 技术原理 (Architecture)
 
@@ -77,7 +80,7 @@
 2.  **核心层 (Python)**：Flask 服务接收请求后，调用 `jmcomic` 库处理复杂的爬虫逻辑（域名解析、加密解密、图片下载）。
 3.  **交付层**：
     *   Python 后端将下载的图片或合成的 PDF 存储在本地。
-    *   Node.js 前端使用 `e.reply(segment.file(url))` 方式发送文件。这种方式是 Yunzai 生态的标准写法，兼容性极佳，无论是私聊还是群聊，无论是本地文件还是网络 URL，都能被适配器正确识别和发送。
+    *   Node.js 前端将封面图片放入合并转发，并单独使用 `e.reply(segment.file('file://' + pdfPath, fileName))` 发送 PDF；大文件通过本地文件路径交给适配器处理。
 
 ## ⚠️ 免责声明
 

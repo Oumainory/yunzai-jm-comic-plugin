@@ -2,6 +2,7 @@
 import sys
 import subprocess
 import os
+import atexit
 
 # 依赖检查与自动安装 (已禁用，避免Linux权限问题)
 # 用户需手动运行 pip install -r requirements.txt
@@ -17,7 +18,7 @@ try:
     
     import jmcomic
     import img2pdf
-    from flask import Flask, request, abort, send_file
+    from flask import Flask, request, abort, send_file, jsonify
     import psutil
     from dotenv import load_dotenv
     from PIL import Image # 启用 PIL 以支持 WebP 转换
@@ -91,7 +92,7 @@ if not os.path.exists(target_option_path):
 
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
-FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
+FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '8000'))
 JM_LOG_DIR = os.getenv('JM_LOG_DIR')
 MEMORY_THRESHOLD = float(os.getenv('MEMORY_THRESHOLD', '80.0'))  # 内存使用百分比阈值
@@ -103,13 +104,34 @@ OPTION_YML_PATH = os.path.join(JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR, 'optio
 
 # 内存监控状态
 memory_monitor_running = True
+PID_FILE = os.path.join(CURRENT_DIR, 'app.pid')
+
+
+def write_pid_file():
+    with open(PID_FILE, 'w', encoding='utf-8') as pid_file:
+        pid_file.write(f"{os.getpid()}\n")
+
+
+def remove_pid_file():
+    try:
+        with open(PID_FILE, 'r', encoding='utf-8') as pid_file:
+            recorded_pid = int(pid_file.read().strip())
+        if recorded_pid == os.getpid():
+            os.remove(PID_FILE)
+    except (OSError, ValueError):
+        pass
+
+
+atexit.register(remove_pid_file)
 
 # 全局 Option 对象
 JM_OPTION = None
 
 # 日志配置
 def configure_logging():
-    log_file_path = os.path.join(JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR, 'app.log')
+    log_dir = JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, 'app.log')
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -274,36 +296,134 @@ def memory_monitor():
             time.sleep(60)  # 出错后等待更长时间
 
 def check_and_release_port(port):
-    """检查端口占用并尝试释放"""
-    import psutil
+    """只停止占用目标端口且确认为本插件 app.py 的旧进程。"""
     try:
-        # 获取当前进程PID，避免误杀自己（虽然此时自己还没绑定端口，但为了保险）
         current_pid = os.getpid()
-        
-        for proc in psutil.process_iter(['pid', 'name']):
+        app_script = os.path.realpath(os.path.abspath(__file__))
+        pyapi_dir = os.path.realpath(CURRENT_DIR)
+
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'cwd']):
             try:
-                # 忽略当前进程
                 if proc.pid == current_pid:
                     continue
-                    
-                for con in proc.connections():
-                    if con.laddr.port == port:
-                        logging.warning(f"检测到端口 {port} 被进程 PID={proc.pid} Name={proc.name()} 占用")
-                        logging.info("尝试终止占用端口的进程...")
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=3)
-                            logging.info(f"进程 {proc.pid} 已终止，端口释放成功")
-                        except psutil.TimeoutExpired:
-                            logging.warning(f"进程 {proc.pid} 无法终止，尝试强制杀死...")
-                            proc.kill()
-                            proc.wait(timeout=3)
-                            logging.info(f"进程 {proc.pid} 已被强制杀死")
-                        return
+                command = proc.info.get('cmdline') or []
+                if not command or 'python' not in os.path.basename(command[0]).lower():
+                    continue
+                try:
+                    process_cwd = os.path.realpath(proc.info.get('cwd') or proc.cwd())
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    process_cwd = ''
+
+                def points_to_plugin_app(arg):
+                    if not arg.lower().endswith('app.py'):
+                        return False
+                    if os.path.isabs(arg):
+                        script_path = arg
+                    elif process_cwd:
+                        script_path = os.path.join(process_cwd, arg)
+                    else:
+                        return False
+                    return os.path.normcase(os.path.realpath(script_path)) == os.path.normcase(app_script)
+
+                has_app_script = any(points_to_plugin_app(arg) for arg in command[1:])
+                if not has_app_script:
+                    continue
+
+                listening = any(
+                    connection.status == psutil.CONN_LISTEN
+                    and connection.laddr
+                    and connection.laddr.port == port
+                    for connection in proc.net_connections(kind='inet')
+                )
+                if not listening:
+                    continue
+
+                logging.warning(f"检测到本插件旧 API 进程占用端口 {port}，PID={proc.pid}，准备停止")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                    logging.info(f"本插件旧 API 进程 PID={proc.pid} 已停止")
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                    logging.info(f"本插件旧 API 进程 PID={proc.pid} 已强制停止")
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+            except Exception as e:
+                logging.warning(f"检查进程 PID={proc.pid} 失败: {e}")
     except Exception as e:
         logging.error(f"释放端口失败: {e}")
+
+# 稳定 JSON 接口，供 Node 前端判断服务状态并等待整本处理完成。
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        'ok': True,
+        'pid': os.getpid(),
+        'status': 'running'
+    })
+
+
+def parse_album_id():
+    raw_jm_id = request.args.get('jm', '')
+    if not raw_jm_id.isascii() or not raw_jm_id.isdigit():
+        return None
+    try:
+        jm_id = int(raw_jm_id)
+    except ValueError:
+        return None
+    return jm_id if jm_id > 0 else None
+
+
+def album_images(album_dir):
+    supported_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+    images = []
+    if not os.path.isdir(album_dir):
+        return images
+    for root, dirs, files in os.walk(album_dir):
+        dirs.sort()
+        for filename in sorted(files):
+            if filename.lower().endswith(supported_extensions):
+                images.append(os.path.abspath(os.path.join(root, filename)))
+    return images
+
+
+@app.route('/album', methods=['GET'])
+def get_album():
+    jm_id = parse_album_id()
+    if jm_id is None:
+        return jsonify({'ok': False, 'error': '参数 jm 必须为正整数', 'code': 400}), 400
+
+    album_dir = os.path.abspath(os.path.join(IMAGE_FOLDER, str(jm_id)))
+    pdf_path = os.path.abspath(os.path.join(PDF_FOLDER, f'{jm_id}.pdf'))
+    try:
+        images = album_images(album_dir)
+        if not images:
+            if not download_album(jm_id):
+                return jsonify({'ok': False, 'error': '下载失败，请稍后重试', 'code': 503}), 503
+            images = album_images(album_dir)
+
+        if not images:
+            return jsonify({'ok': False, 'error': '下载后仍未找到专辑图片', 'code': 404}), 404
+
+        if not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) <= 0:
+            logging.info(f"PDF不存在，开始手动合成: {jm_id}")
+            if not generate_pdf_manually(jm_id) or not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) <= 0:
+                return jsonify({'ok': False, 'error': '专辑图片已获取，但 PDF 合成失败', 'code': 500}), 500
+
+        return jsonify({
+            'ok': True,
+            'jm': jm_id,
+            'page_count': len(images),
+            'cover_path': images[0],
+            'pdf_path': pdf_path,
+            'pdf_size': os.path.getsize(pdf_path),
+            'album_dir': album_dir
+        })
+    except Exception as e:
+        logging.exception(f"处理专辑 {jm_id} 失败")
+        return jsonify({'ok': False, 'error': f'处理专辑时发生错误：{e}', 'code': 500}), 500
+
 
 # 路由处理
 @app.route('/jmd', methods=['GET'])
@@ -437,6 +557,7 @@ def return_status():
 # 主程序
 if __name__ == '__main__':
     configure_logging()
+    write_pid_file()
     
     # 尝试在启动时立即更新一次域名，确保拿到最新的可用域名
     try:
@@ -465,7 +586,8 @@ if __name__ == '__main__':
             host=FLASK_HOST,
             port=FLASK_PORT,
             debug=False,
-            use_reloader=False
+            use_reloader=False,
+            threaded=True
         )
     except OSError as e:
         if e.errno == 98 or e.errno == 10048: # Address already in use (Linux / Windows)
@@ -478,4 +600,5 @@ if __name__ == '__main__':
         # 停止内存监控
         memory_monitor_running = False
         monitor_thread.join(timeout=5)
+        remove_pid_file()
         logging.info("服务已停止")
