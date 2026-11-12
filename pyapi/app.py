@@ -22,6 +22,7 @@ try:
     import psutil
     from dotenv import load_dotenv
     from PIL import Image # 启用 PIL 以支持 WebP 转换
+    from cover_preview import create_cover_preview
 except ImportError as e:
     print(f"\n[Error] 缺少必要依赖: {e.name}")
     print("请手动运行安装命令:")
@@ -366,10 +367,13 @@ def health():
 
 def parse_album_id():
     raw_jm_id = request.args.get('jm', '')
-    if not raw_jm_id.isascii() or not raw_jm_id.isdigit():
+    normalized = ''.join(raw_jm_id.split())
+    if normalized[:2].lower() == 'jm':
+        normalized = normalized[2:]
+    if not normalized.isascii() or not normalized.isdigit():
         return None
     try:
-        jm_id = int(raw_jm_id)
+        jm_id = int(normalized)
     except ValueError:
         return None
     return jm_id if jm_id > 0 else None
@@ -411,11 +415,19 @@ def get_album():
             if not generate_pdf_manually(jm_id) or not os.path.isfile(pdf_path) or os.path.getsize(pdf_path) <= 0:
                 return jsonify({'ok': False, 'error': '专辑图片已获取，但 PDF 合成失败', 'code': 500}), 500
 
+        cover_preview_path = os.path.abspath(os.path.join(PDF_FOLDER, f'{jm_id}.cover-preview.jpg'))
+        try:
+            create_cover_preview(images[0], cover_preview_path)
+        except Exception as preview_error:
+            logging.warning(f"封面预览图生成失败 {jm_id}: {preview_error}")
+            cover_preview_path = None
+
         return jsonify({
             'ok': True,
             'jm': jm_id,
             'page_count': len(images),
             'cover_path': images[0],
+            'cover_preview_path': cover_preview_path,
             'pdf_path': pdf_path,
             'pdf_size': os.path.getsize(pdf_path),
             'album_dir': album_dir

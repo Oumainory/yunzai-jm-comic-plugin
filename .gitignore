@@ -8,3 +8,4 @@ resources/app.log
 resources/long/*
 !resources/long/none.txt
 resources/pdf/*.pdf
+resources/pdf/*.cover-preview.jpg

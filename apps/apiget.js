@@ -5,11 +5,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import fetch from 'node-fetch';
 import fs from 'node:fs';
+import { fileToBase64Url, parseJmId } from './jm-utils.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
 const pyapiDir = path.join(pluginRoot, 'pyapi');
 const appScript = path.join(pyapiDir, 'app.py');
+const coverPreviewScript = path.join(pyapiDir, 'cover_preview.py');
 const pidFile = path.join(pyapiDir, 'app.pid');
 const logFile = path.join(pyapiDir, 'run.log');
 const CONFIG_FILE = path.join(pluginRoot, 'config', 'config.json');
@@ -55,6 +57,114 @@ function apiBase() {
 function requestTimeoutMs() {
     const timeout = Number(CONFIG.request_timeout_ms);
     return Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.request_timeout_ms;
+}
+
+function sanitizeSendError(value) {
+    const message = String(value?.message || value || '').replace(/base64:\/\/\S+/gi, 'base64://[内容已隐藏]');
+    if (/delivery was not confirmed|no message receipt/i.test(message)) {
+        return 'QQ 未确认消息送达（未返回消息回执）';
+    }
+    if (/retcode\s*[:=]?\s*100/i.test(message)) return 'QQ 返回 retcode 100，未确认消息送达';
+    if (/EACCES|permission denied/i.test(message)) return '本地文件访问被拒绝（EACCES）';
+    return (message.trim() || '未知错误').slice(0, 300);
+}
+
+function hasMessageId(value, visited = new Set()) {
+    if (!value || typeof value !== 'object' || visited.has(value)) return false;
+    visited.add(value);
+    if (Array.isArray(value)) return value.some(item => hasMessageId(item, visited));
+    if (value.message_id !== undefined && value.message_id !== null && value.message_id !== '') {
+        return Array.isArray(value.message_id) ? value.message_id.length > 0 : true;
+    }
+    return Object.values(value).some(item => hasMessageId(item, visited));
+}
+
+function replyFailureReason(result) {
+    if (result === false || result === null || result === undefined) return '平台未返回消息回执';
+    if (typeof result === 'string') {
+        if (/delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100/i.test(result)) {
+            return sanitizeSendError(result);
+        }
+        return '平台未返回 message_id，无法确认消息已送达';
+    }
+    if (typeof result === 'object') {
+        const retcode = Number(result.retcode);
+        if (Number.isFinite(retcode) && ![0, 1].includes(retcode)) {
+            return sanitizeSendError(`retcode ${retcode}: ${result.msg || result.wording || ''}`);
+        }
+        if (result.ok === false || /^(failed|error)$/i.test(String(result.status || ''))) {
+            return sanitizeSendError(result.error || result.msg || result.wording || result.status);
+        }
+        if (hasMessageId(result)) return null;
+        const detail = result.error || result.msg || result.wording || result.message;
+        if (detail && /delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100/i.test(String(detail))) {
+            return sanitizeSendError(detail);
+        }
+    }
+    return '平台未返回 message_id，无法确认消息已送达';
+}
+
+async function safeReply(e, message) {
+    try {
+        const result = await e.reply(message);
+        const failure = replyFailureReason(result);
+        if (!failure) return true;
+        logger.error(`[jm] 消息发送未确认: ${failure}`);
+        await retrySendFailureNotice(e, failure);
+        return false;
+    } catch (error) {
+        const failure = sanitizeSendError(error);
+        logger.error(`[jm] 消息发送失败: ${failure}`);
+        await retrySendFailureNotice(e, failure);
+        return false;
+    }
+}
+
+async function retrySendFailureNotice(e, failure) {
+    try {
+        const result = await e.reply(`消息发送失败，原因：${failure}`);
+        const retryFailure = replyFailureReason(result);
+        if (retryFailure) logger.error(`[jm] 发送失败提示也未确认: ${retryFailure}`);
+    } catch (error) {
+        logger.error(`[jm] 发送失败提示也失败: ${sanitizeSendError(error)}`);
+    }
+}
+
+function coverPreviewPath(pdfPath, jmId) {
+    return path.join(path.dirname(pdfPath), `${jmId}.cover-preview.jpg`);
+}
+
+function ensureCoverPreview(result, jmId, pdfPath, coverPath) {
+    if (result.cover_preview_path && fs.existsSync(result.cover_preview_path)) {
+        return result.cover_preview_path;
+    }
+
+    const outputPath = coverPreviewPath(pdfPath, jmId);
+    const { command } = pythonCommand();
+    try {
+        execFileSync(command, [coverPreviewScript, coverPath, outputPath], { encoding: 'utf8' });
+    } catch (error) {
+        throw new Error(error.stderr?.trim() || error.message);
+    }
+    if (!fs.existsSync(outputPath)) throw new Error('Python 未生成封面预览图');
+    return outputPath;
+}
+
+function assertFileUploadSucceeded(result) {
+    if (result === false || result === null || result === undefined) {
+        throw new Error('OneBot 未返回文件上传结果');
+    }
+    if (typeof result === 'object') {
+        const retcode = Number(result.retcode);
+        if (Number.isFinite(retcode) && ![0, 1].includes(retcode)) {
+            throw new Error(`retcode ${retcode}: ${result.msg || result.wording || ''}`);
+        }
+        if (result.ok === false || /^(failed|error)$/i.test(String(result.status || ''))) {
+            throw new Error(result.error || result.msg || result.wording || 'OneBot 返回上传失败');
+        }
+    } else if (typeof result === 'string' && /failed|error|retcode\s*[:=]?\s*100/i.test(result)) {
+        throw new Error(result);
+    }
 }
 
 async function fetchWithTimeout(url, timeoutMs) {
@@ -394,19 +504,19 @@ export class ejm extends plugin {
     }
 
     async Jm(e) {
-        const rawJmId = e.msg.replace(/#jm查/g, '').trim();
-        if (!/^\d+$/.test(rawJmId) || !Number.isSafeInteger(Number(rawJmId)) || Number(rawJmId) <= 0) {
-            return e.reply('车号必须是正整数。用法：#jm查 <车号>');
+        const rawJmId = e.msg.match(jm)?.[1] ?? '';
+        const jmId = parseJmId(rawJmId);
+        if (!jmId) {
+            return safeReply(e, '车号必须是正整数。用法：#jm查 <车号>，也可写成 #jm查 JM123 或 #jm查 jm 123');
         }
-        const jmId = String(Number(rawJmId));
 
-        await e.reply(`正在获取 车号 ${jmId}，请稍候`);
+        await safeReply(e, `正在获取 车号 ${jmId}，请稍候`);
         const initialHealth = await checkApiHealth();
         if (!initialHealth.ok) {
             try {
                 await ensureApiRunning();
             } catch (error) {
-                return e.reply(`API未能启动：${error.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
+                return safeReply(e, `API未能启动：${error.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
             }
         }
 
@@ -417,68 +527,104 @@ export class ejm extends plugin {
             response = await fetchWithTimeout(url, requestTimeoutMs());
         } catch (error) {
             if (error.name === 'AbortError') {
-                return e.reply(`获取车号 ${jmId} 超时（${Math.round(requestTimeoutMs() / 1000)} 秒），下载可能仍在进行，请稍后重试。`);
+                return safeReply(e, `获取车号 ${jmId} 超时（${Math.round(requestTimeoutMs() / 1000)} 秒），下载可能仍在进行，请稍后重试。`);
             }
             logger.error(`[jm] 请求车号 ${jmId} 失败: ${error.message}`);
             try {
                 await ensureApiRunning();
-                return e.reply('连接 API 失败，已检查并尝试恢复服务，请稍后重试。');
+                return safeReply(e, '连接 API 失败，已检查并尝试恢复服务，请稍后重试。');
             } catch (startError) {
-                return e.reply(`连接 API 失败且自动启动未成功：${startError.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
+                return safeReply(e, `连接 API 失败且自动启动未成功：${startError.message}\n请使用 #jm启动api 或 #jm安装依赖。`);
             }
         }
 
         try {
             result = await response.json();
         } catch (_) {
-            return e.reply(`API返回了无法识别的数据（HTTP ${response.status}），请检查后端日志。`);
+            return safeReply(e, `API返回了无法识别的数据（HTTP ${response.status}），请检查后端日志。`);
         }
 
         if (!response.ok || result?.ok !== true) {
             const errorText = result?.error || '后端未提供错误信息';
-            if (response.status === 400) return e.reply(`车号参数无效：${errorText}`);
-            if (response.status === 404) return e.reply(`未找到车号 ${jmId} 的资源：${errorText}`);
-            if (response.status === 503) return e.reply(`车号 ${jmId} 获取失败，后端暂时不可用：${errorText}。请稍后重试。`);
-            if (response.status === 500) return e.reply(`车号 ${jmId} 处理失败：${errorText}。请查看后端日志。`);
-            return e.reply(`获取车号 ${jmId} 失败（HTTP ${response.status}）：${errorText}`);
+            if (response.status === 400) return safeReply(e, `车号参数无效：${errorText}`);
+            if (response.status === 404) return safeReply(e, `未找到车号 ${jmId} 的资源：${errorText}`);
+            if (response.status === 503) return safeReply(e, `车号 ${jmId} 获取失败，后端暂时不可用：${errorText}。请稍后重试。`);
+            if (response.status === 500) return safeReply(e, `车号 ${jmId} 处理失败：${errorText}。请查看后端日志。`);
+            return safeReply(e, `获取车号 ${jmId} 失败（HTTP ${response.status}）：${errorText}`);
         }
 
         const coverPath = result.cover_path;
         const pdfPath = result.pdf_path;
-        if (!coverPath || !pdfPath || !fs.existsSync(coverPath) || !fs.existsSync(pdfPath)) {
-            logger.error(`[jm] API 返回的文件不存在，车号=${jmId}，cover=${coverPath}，pdf=${pdfPath}`);
-            return e.reply('后端返回成功，但本地封面或 PDF 文件不存在，请检查 pyapi/run.log。');
-        }
-
-        const forward = await common.makeForwardMsg(e, [
-            `车号 ${jmId}，共 ${result.page_count} 页。`,
-            [segment.image(pathToFileURL(path.resolve(coverPath)).href)]
-        ], `album${jmId}`);
+        const pageCount = result.page_count || '未知';
+        let coverSent = false;
         try {
-            await e.reply(forward);
+            if (!coverPath || !fs.existsSync(coverPath)) throw new Error('后端返回的封面文件不存在');
+            if (!pdfPath) throw new Error('后端未返回 PDF 路径，无法保存封面预览图');
+            const previewPath = ensureCoverPreview(result, jmId, pdfPath, coverPath);
+            const forward = await common.makeForwardMsg(e, [
+                `车号 ${jmId}，共 ${pageCount} 页。`,
+                [segment.image(pathToFileURL(path.resolve(previewPath)).href)]
+            ], `album${jmId}`);
+            const replyResult = await e.reply(forward);
+            const failure = replyFailureReason(replyResult);
+            if (failure) {
+                const error = new Error(failure);
+                error.replyFailure = true;
+                throw error;
+            }
+            coverSent = true;
         } catch (error) {
-            logger.error(`[jm] 发送封面转发失败: ${error.message}`);
-            return e.reply(`车号 ${jmId} 已获取，但发送封面失败：${error.message}`);
+            logger.error(`[jm] 发送封面转发失败: ${sanitizeSendError(error)}`);
+            const reason = sanitizeSendError(error);
+            const blocked = error.replyFailure || /delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100|未返回 message_id/i.test(String(error.message));
+            const status = blocked ? `封面被拦截，QQ 未确认收到` : `封面发送失败`;
+            await safeReply(e, `车号 ${jmId}，共 ${pageCount} 页。${status}：${reason}。正在继续处理 PDF。`);
         }
 
+        const coverStatus = coverSent ? '封面已发送' : '封面被拦截或发送失败';
+        if (!pdfPath || !fs.existsSync(pdfPath)) {
+            logger.error(`[jm] API 返回的 PDF 文件不存在，车号=${jmId}，pdf=${pdfPath}`);
+            return safeReply(e, `车号 ${jmId} 的${coverStatus}，但本地 PDF 文件不存在，未能上传；请检查 pyapi/run.log。`);
+        }
+
+        let pdfSize;
+        try {
+            pdfSize = fs.statSync(pdfPath).size;
+        } catch (error) {
+            return safeReply(e, `车号 ${jmId} 的${coverStatus}，读取 PDF 体积失败：${sanitizeSendError(error)}。`);
+        }
         const maxPdfMb = Number(CONFIG.max_pdf_mb);
         const maxBytes = (Number.isFinite(maxPdfMb) && maxPdfMb > 0 ? maxPdfMb : DEFAULT_CONFIG.max_pdf_mb) * 1024 * 1024;
-        const pdfSize = Number(result.pdf_size);
         if (!Number.isFinite(pdfSize) || pdfSize <= 0) {
-            return e.reply(`车号 ${jmId} 的 PDF 体积信息无效，未发送文件。`);
+            return safeReply(e, `车号 ${jmId} 的${coverStatus}，但 PDF 文件体积无效，未上传。`);
         }
-        if (Number.isFinite(pdfSize) && pdfSize > maxBytes) {
+        if (pdfSize > maxBytes) {
             const sizeMb = (pdfSize / 1024 / 1024).toFixed(2);
             const limitMb = (maxBytes / 1024 / 1024).toFixed(2);
-            return e.reply(`车号 ${jmId} 的 PDF 为 ${sizeMb} MB，超过发送上限 ${limitMb} MB；封面已发送，PDF 未发送。`);
+            return safeReply(e, `车号 ${jmId} 的 PDF 为 ${sizeMb} MB，超过发送上限 ${limitMb} MB；${coverStatus}，PDF 未上传。`);
         }
 
         try {
-            await e.reply(segment.file(pathToFileURL(path.resolve(pdfPath)).href, `${jmId}.pdf`));
+            const file = await fileToBase64Url(pdfPath);
+            let action;
+            let params;
+            if (e.group_id) {
+                action = 'upload_group_file';
+                params = { group_id: e.group_id, file, name: `${jmId}.pdf` };
+            } else if (e.user_id) {
+                action = 'upload_private_file';
+                params = { user_id: e.user_id, file, name: `${jmId}.pdf` };
+            } else {
+                throw new Error('无法识别当前群聊或私聊对象');
+            }
+            const uploadResult = await e.bot.sendApi(action, params);
+            assertFileUploadSucceeded(uploadResult);
+            await safeReply(e, `车号 ${jmId}：${coverStatus}，PDF 已上传。`);
         } catch (error) {
-            logger.error(`[jm] 发送车号 ${jmId} PDF 失败: ${error.message}`);
-            return e.reply(`车号 ${jmId} 的封面已发送，但 PDF 发送失败：${error.message}`);
+            logger.error(`[jm] 发送车号 ${jmId} PDF 失败: ${sanitizeSendError(error)}`);
+            return safeReply(e, `车号 ${jmId} 的${coverStatus}，但 PDF 发送失败：${sanitizeSendError(error)}。`);
         }
+        return true;
     }
 
     async apirun(e) {
