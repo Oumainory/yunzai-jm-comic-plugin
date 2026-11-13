@@ -410,7 +410,7 @@ const jm = jmCommandPatterns.album;
 const Apirun = /^#jm(启动|重启)api$/;
 const Apitimerestart = /^#jm定时检查$/;
 const Apirestart = /^#jm检查api$/;
-const SetApiUrl = /^#jm设置api地址(.*)$/;
+const SetApiUrl = jmCommandPatterns.apiUrl;
 
 export class ejm extends plugin {
     constructor() {
@@ -430,7 +430,7 @@ export class ejm extends plugin {
     }
 
     async setApiUrl(e) {
-        let url = e.msg.replace(/#jm设置api地址/g, '').trim();
+        let url = e.msg.match(jmCommandPatterns.apiUrl)?.[1]?.trim() || '';
         if (!url) {
             return e.reply(`当前配置：\n内部 API：${CONFIG.api_url}\n外部 API：${CONFIG.public_api_url}\n\n请发送：#jm设置api地址 http://IP:PORT`);
         }

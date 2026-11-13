@@ -5,15 +5,19 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { jmApi } from './apiget.js';
 import {
+    CATEGORY_HELP,
+    RANKING_HELP,
     buildJmHelpText,
     formatComments,
     formatListPage,
     jmCommandPatterns,
+    parseCategoryArgs,
     parseJmChapterArgs,
     parseJmId,
     parseJmIdAndPage,
     parsePageOnly,
     parsePositiveInteger,
+    parseRankingArgs,
     parseTermAndPage,
     replyFailureReason,
     sanitizeSendError,
@@ -29,92 +33,11 @@ const {
     safeReply
 } = jmApi;
 
-const CATEGORY_ALIASES = new Map([
-    ['全部', '全部'], ['all', '全部'], ['同人', '同人'], ['doujin', '同人'],
-    ['单本', '单本'], ['single', '单本'], ['短篇', '短篇'], ['short', '短篇'],
-    ['韩漫', '韩漫'], ['hanman', '韩漫'], ['美漫', '美漫'], ['meiman', '美漫'],
-    ['英文', '英文'], ['英文站', '英文'], ['english', '英文'], ['english_site', '英文'],
-    ['其他', '其他'], ['another', '其他'], ['other', '其他'], ['3d', '3D'],
-    ['cosplay', 'cosplay'], ['doujin_cosplay', 'cosplay']
-]);
-const ORDER_ALIASES = new Map([
-    ['最新', '最新'], ['latest', '最新'], ['观看', '观看'], ['view', '观看'],
-    ['点赞', '点赞'], ['like', '点赞'], ['评分', '评分'], ['score', '评分'],
-    ['图片', '图片'], ['picture', '图片'], ['评论', '评论'], ['comment', '评论']
-]);
-const TIME_ALIASES = new Map([
-    ['今天', '今天'], ['日', '今天'], ['today', '今天'], ['一周', '一周'], ['周', '一周'], ['week', '一周'],
-    ['本月', '本月'], ['月', '本月'], ['month', '本月'], ['全部', '全部'], ['all', '全部']
-]);
-const PERIOD_ALIASES = new Map([
-    ['日', '日'], ['day', '日'], ['周', '周'], ['week', '周'], ['月', '月'], ['month', '月']
-]);
-
-const CATEGORY_HELP = '可用分类：全部、同人、单本、短篇、韩漫、美漫、英文、其他、3D、cosplay。\n可用排序：最新、观看、点赞、评分、图片、评论。\n可用时间：今天、一周、本月、全部。\n示例：#jm分类 同人 最新 一周 2';
-const RANKING_HELP = '可用排行：日、周、月；分类：全部、同人、单本、短篇、韩漫、美漫、英文、其他、3D。\n示例：#jm排行 周 同人 2';
-
 class ApiError extends Error {
     constructor(message, status = 500, extra = {}) {
         super(message);
         this.status = status;
         Object.assign(this, extra);
-    }
-}
-
-function normalizeAlias(raw, aliases, label) {
-    const value = String(raw || '').trim();
-    const normalized = aliases.get(value.toLowerCase()) || aliases.get(value);
-    if (!normalized) throw new Error(`${label}无效。`);
-    return normalized;
-}
-
-function parseRankingArgs(raw) {
-    const tokens = String(raw || '').trim().split(/\s+/u).filter(Boolean);
-    if (tokens.some(token => /^(帮助|help|\?)$/i.test(token))) return { help: true };
-    let page = 1;
-    if (tokens.length && /^\d+$/.test(tokens.at(-1))) {
-        page = parsePositiveInteger(tokens.pop());
-        if (!page) return { error: RANKING_HELP };
-    }
-    if (tokens.length > 2) return { error: RANKING_HELP };
-
-    let period = '周';
-    let category = '全部';
-    if (tokens.length) {
-        const periodValue = PERIOD_ALIASES.get(tokens[0].toLowerCase()) || PERIOD_ALIASES.get(tokens[0]);
-        if (periodValue) {
-            period = periodValue;
-            if (tokens[1]) {
-                try { category = normalizeAlias(tokens[1], CATEGORY_ALIASES, '分类'); } catch (_) { return { error: RANKING_HELP }; }
-            }
-        } else if (tokens.length === 1) {
-            try { category = normalizeAlias(tokens[0], CATEGORY_ALIASES, '分类'); } catch (_) { return { error: RANKING_HELP }; }
-        } else {
-            return { error: RANKING_HELP };
-        }
-    }
-    return { period, category, page };
-}
-
-function parseCategoryArgs(raw) {
-    const tokens = String(raw || '').trim().split(/\s+/u).filter(Boolean);
-    if (tokens.some(token => /^(帮助|help|\?)$/i.test(token))) return { help: true };
-    let page = 1;
-    if (tokens.length && /^\d+$/.test(tokens.at(-1))) {
-        page = parsePositiveInteger(tokens.pop());
-        if (!page) return { error: CATEGORY_HELP };
-    }
-    if (tokens.length > 3) return { error: CATEGORY_HELP };
-    const [category = '全部', order = '最新', time = '全部'] = tokens;
-    try {
-        return {
-            category: normalizeAlias(category, CATEGORY_ALIASES, '分类'),
-            order: normalizeAlias(order, ORDER_ALIASES, '排序'),
-            time: normalizeAlias(time, TIME_ALIASES, '时间'),
-            page
-        };
-    } catch (_) {
-        return { error: CATEGORY_HELP };
     }
 }
 
@@ -251,8 +174,8 @@ export class ejmFeatures extends plugin {
             { reg: jmCommandPatterns.likeStatus, fnc: 'likeStatus', permission: 'master' },
             { reg: jmCommandPatterns.favorites, fnc: 'favorites', permission: 'master' },
             { reg: jmCommandPatterns.comments, fnc: 'comments' },
-            { reg: /^#jm排行(.*?)\s*$/, fnc: 'ranking' },
-            { reg: /^#jm分类(.*?)\s*$/, fnc: 'category' },
+            { reg: jmCommandPatterns.ranking, fnc: 'ranking' },
+            { reg: jmCommandPatterns.category, fnc: 'category' },
             { reg: jmCommandPatterns.longImage, fnc: 'longImage' },
             { reg: jmCommandPatterns.pages, fnc: 'pages' },
             { reg: jmCommandPatterns.search, fnc: 'search' },
@@ -260,7 +183,7 @@ export class ejmFeatures extends plugin {
             { reg: jmCommandPatterns.info, fnc: 'info' },
             { reg: jmCommandPatterns.zip, fnc: 'zip' },
             { reg: jmCommandPatterns.favorite, fnc: 'favorite', permission: 'master' },
-            { reg: /^#jm登录(?:\s+(.*))?\s*$/, fnc: 'login', permission: 'master' }
+            { reg: jmCommandPatterns.login, fnc: 'login', permission: 'master' }
         ];
         rules.sort((left, right) => right.reg.source.length - left.reg.source.length);
         super({ name: 'ejmFeatures', dsc: 'JM 搜索与资料功能', event: 'message', priority: 1, rule: rules });
@@ -326,7 +249,7 @@ export class ejmFeatures extends plugin {
     }
 
     async ranking(e) {
-        const args = parseRankingArgs(e.msg.match(/^#jm排行(.*?)\s*$/)?.[1] || '');
+        const args = parseRankingArgs(e.msg.match(jmCommandPatterns.ranking)?.[1] || '');
         if (args.help) return safeReply(e, RANKING_HELP);
         if (args.error) return safeReply(e, `${args.error}\n用法：#jm排行 [日|周|月] [分类] [页码]`);
         try {
@@ -339,7 +262,7 @@ export class ejmFeatures extends plugin {
     }
 
     async category(e) {
-        const args = parseCategoryArgs(e.msg.match(/^#jm分类(.*?)\s*$/)?.[1] || '');
+        const args = parseCategoryArgs(e.msg.match(jmCommandPatterns.category)?.[1] || '');
         if (args.help) return safeReply(e, CATEGORY_HELP);
         if (args.error) return safeReply(e, `${args.error}\n用法：#jm分类 [分类] [排序] [时间] [页码]`);
         try {
@@ -451,7 +374,7 @@ export class ejmFeatures extends plugin {
 
     async login(e) {
         if (e.group_id) return safeReply(e, '请私聊发送 #jm登录 账号 密码');
-        const match = e.msg.match(/^#jm登录(?:\s+(.*))?\s*$/);
+        const match = e.msg.match(jmCommandPatterns.login);
         const credentials = String(match?.[1] || '').trim().split(/\s+/u).filter(Boolean);
         if (!credentials.length) {
             try {

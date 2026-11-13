@@ -3,30 +3,59 @@ import fs from 'node:fs/promises';
 export const jmCommandPatterns = Object.freeze({
     help: /^#jm(?:帮助|help)\s*$/i,
     album: /^#jm查(?!章)(.*)$/i,
-    chapter: /^#jm查章(?:\s+(.*))?\s*$/i,
+    chapter: /^#jm查章(?:\s*(.*))?\s*$/i,
     search: /^#jm搜\s*(.*?)\s*$/,
     tag: /^#jm标签\s*(.*?)\s*$/,
-    info: /^#jm资料(?:\s+(.*))?\s*$/i,
+    info: /^#jm资料(?:\s*(.*))?\s*$/i,
     comments: /^#jm评论\s*(.*?)\s*$/,
-    favorite: /^#jm收藏(?:\s+(.*))?\s*$/i,
-    unfavorite: /^#jm取消收藏(?:\s+(.*))?\s*$/i,
-    favorites: /^#jm收藏夹(?:\s+(.*))?\s*$/i,
-    likeStatus: /^#jm点赞状态(?:\s+(.*))?\s*$/i,
-    zip: /^#jm压缩包(?:\s+(.*))?\s*$/i,
-    longImage: /^#jm长图(?:\s+(.*))?\s*$/i,
-    pages: /^#jm图页(?:\s+(.*))?\s*$/i
+    ranking: /^#jm排行(.*?)\s*$/i,
+    category: /^#jm分类(.*?)\s*$/i,
+    favorite: /^#jm收藏(?!夹)(?:\s*(.*))?\s*$/i,
+    unfavorite: /^#jm取消收藏(?:\s*(.*))?\s*$/i,
+    favorites: /^#jm收藏夹(?:\s*(.*))?\s*$/i,
+    likeStatus: /^#jm点赞状态(?:\s*(.*))?\s*$/i,
+    zip: /^#jm压缩包(?:\s*(.*))?\s*$/i,
+    longImage: /^#jm长图(?:\s*(.*))?\s*$/i,
+    pages: /^#jm图页(?:\s*(.*))?\s*$/i,
+    login: /^#jm登录(?:\s*(.*))?\s*$/i,
+    apiUrl: /^#jm设置api地址(?:\s*(.*))?\s*$/i
 });
+
+export const CATEGORY_HELP = '可用分类：全部、同人、单本、短篇、韩漫、美漫、英文、其他、3D、cosplay。\n可用排序：最新、观看、点赞、评分、图片、评论。\n可用时间：今天、一周、本月、全部。\n示例：#jm分类 同人 最新 一周 2';
+export const RANKING_HELP = '可用排行：日、周、月；分类：全部、同人、单本、短篇、韩漫、美漫、英文、其他、3D。\n示例：#jm排行 周 同人 2';
+
+const CATEGORY_ALIASES = new Map([
+    ['全部', '全部'], ['all', '全部'], ['同人', '同人'], ['doujin', '同人'],
+    ['单本', '单本'], ['single', '单本'], ['短篇', '短篇'], ['short', '短篇'],
+    ['韩漫', '韩漫'], ['hanman', '韩漫'], ['美漫', '美漫'], ['meiman', '美漫'],
+    ['英文', '英文'], ['英文站', '英文'], ['english', '英文'], ['english_site', '英文'],
+    ['其他', '其他'], ['another', '其他'], ['other', '其他'], ['3d', '3D'],
+    ['cosplay', 'cosplay'], ['doujin_cosplay', 'cosplay']
+]);
+const ORDER_ALIASES = new Map([
+    ['最新', '最新'], ['latest', '最新'], ['观看', '观看'], ['view', '观看'],
+    ['点赞', '点赞'], ['like', '点赞'], ['评分', '评分'], ['score', '评分'],
+    ['图片', '图片'], ['picture', '图片'], ['评论', '评论'], ['comment', '评论']
+]);
+const TIME_ALIASES = new Map([
+    ['今天', '今天'], ['日', '今天'], ['today', '今天'], ['一周', '一周'], ['周', '一周'], ['week', '一周'],
+    ['本月', '本月'], ['月', '本月'], ['month', '本月'], ['全部', '全部'], ['all', '全部']
+]);
+const PERIOD_ALIASES = new Map([
+    ['日', '日'], ['day', '日'], ['周', '周'], ['week', '周'], ['月', '月'], ['month', '月']
+]);
 
 export function buildJmHelpText() {
     return [
         'JM 指令帮助（也可发送 #jmhelp）',
+        '指令和参数之间可加空格，也可不加。',
         '',
         '【公共指令】',
         '#jm查 <车号>：下载整本 PDF，例如 #jm查 JM123456（可无空格）',
         '#jm查章 <车号> <章节序号>：下载指定章节，例如 #jm查章 JM123456 2',
         '#jm搜 <关键词> [页码]：站内搜索，例如 #jm搜 无修正 2',
         '#jm标签 <标签> [页码]：按标签搜索，例如 #jm标签 中文 3',
-        '#jm资料 <车号>：查看资料，例如 #jm资料 JM123456（车号前需要空格）',
+        '#jm资料 <车号>：查看资料，例如 #jm资料 JM123456',
         '#jm评论 <车号> [页码]：查看评论，例如 #jm评论 JM123456 2',
         '#jm排行 [日|周|月] [分类] [页码]：默认周榜；发送 #jm排行 帮助 查看参数',
         '#jm分类 [分类] [排序] [时间] [页码]：发送 #jm分类 帮助 查看参数',
@@ -64,6 +93,63 @@ export function parsePositiveInteger(raw, fallback = null) {
     if (!/^\d+$/.test(text)) return null;
     const value = Number(text);
     return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function normalizeAlias(raw, aliases, label) {
+    const value = String(raw || '').trim();
+    const normalized = aliases.get(value.toLowerCase()) || aliases.get(value);
+    if (!normalized) throw new Error(`${label}无效。`);
+    return normalized;
+}
+
+export function parseRankingArgs(raw) {
+    const tokens = String(raw || '').trim().split(/\s+/u).filter(Boolean);
+    if (tokens.some(token => /^(帮助|help|\?)$/i.test(token))) return { help: true };
+    let page = 1;
+    if (tokens.length && /^\d+$/.test(tokens.at(-1))) {
+        page = parsePositiveInteger(tokens.pop());
+        if (!page) return { error: RANKING_HELP };
+    }
+    if (tokens.length > 2) return { error: RANKING_HELP };
+
+    let period = '周';
+    let category = '全部';
+    if (tokens.length) {
+        const periodValue = PERIOD_ALIASES.get(tokens[0].toLowerCase()) || PERIOD_ALIASES.get(tokens[0]);
+        if (periodValue) {
+            period = periodValue;
+            if (tokens[1]) {
+                try { category = normalizeAlias(tokens[1], CATEGORY_ALIASES, '分类'); } catch (_) { return { error: RANKING_HELP }; }
+            }
+        } else if (tokens.length === 1) {
+            try { category = normalizeAlias(tokens[0], CATEGORY_ALIASES, '分类'); } catch (_) { return { error: RANKING_HELP }; }
+        } else {
+            return { error: RANKING_HELP };
+        }
+    }
+    return { period, category, page };
+}
+
+export function parseCategoryArgs(raw) {
+    const tokens = String(raw || '').trim().split(/\s+/u).filter(Boolean);
+    if (tokens.some(token => /^(帮助|help|\?)$/i.test(token))) return { help: true };
+    let page = 1;
+    if (tokens.length && /^\d+$/.test(tokens.at(-1))) {
+        page = parsePositiveInteger(tokens.pop());
+        if (!page) return { error: CATEGORY_HELP };
+    }
+    if (tokens.length > 3) return { error: CATEGORY_HELP };
+    const [category = '全部', order = '最新', time = '全部'] = tokens;
+    try {
+        return {
+            category: normalizeAlias(category, CATEGORY_ALIASES, '分类'),
+            order: normalizeAlias(order, ORDER_ALIASES, '排序'),
+            time: normalizeAlias(time, TIME_ALIASES, '时间'),
+            page
+        };
+    } catch (_) {
+        return { error: CATEGORY_HELP };
+    }
 }
 
 export function parseTermAndPage(raw) {

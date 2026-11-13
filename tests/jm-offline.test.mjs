@@ -10,9 +10,12 @@ import {
     formatComments,
     formatListPage,
     jmCommandPatterns,
+    parseCategoryArgs,
     parseJmChapterArgs,
     parseJmId,
     parseJmIdAndPage,
+    parsePageOnly,
+    parseRankingArgs,
     parseTermAndPage,
     assertFileUploadSucceeded,
     replyFailureReason,
@@ -68,11 +71,136 @@ test('chapter parser and command patterns keep specific commands separate', () =
     assert.equal(parseJmChapterArgs('123 0').valid, false);
 
     assert.equal(jmCommandPatterns.chapter.test('#jm查章 JM123 2'), true);
+    assert.equal(jmCommandPatterns.chapter.test('#jm查章1257267 2'), true);
+    assert.equal(jmCommandPatterns.chapter.test('#jm查章JM1257267 2'), true);
+    assert.equal(jmCommandPatterns.chapter.test('#jm查章 JM1257267 2'), true);
     assert.equal(jmCommandPatterns.album.test('#jm查章 JM123 2'), false);
+    assert.equal(jmCommandPatterns.album.test('#jm查章1257267 2'), false);
     assert.equal(jmCommandPatterns.album.test('#jm查 JM 123'), true);
     assert.equal(jmCommandPatterns.favorites.test('#jm收藏夹 2'), true);
+    assert.equal(jmCommandPatterns.favorites.test('#jm收藏夹2'), true);
+    assert.equal(jmCommandPatterns.favorites.test('#jm收藏夹'), true);
+    assert.equal(jmCommandPatterns.favorite.test('#jm收藏夹'), false);
     assert.equal(jmCommandPatterns.favorite.test('#jm收藏夹 2'), false);
+    assert.equal(jmCommandPatterns.favorite.test('#jm收藏夹2'), false);
     assert.equal(jmCommandPatterns.favorite.test('#jm收藏 JM123'), true);
+    assert.equal(jmCommandPatterns.favorite.test('#jm收藏123'), true);
+    assert.equal(jmCommandPatterns.unfavorite.test('#jm取消收藏123'), true);
+    assert.equal(jmCommandPatterns.favorite.test('#jm取消收藏123'), false);
+});
+
+test('ID commands accept either separator and pass captured IDs to parsers', () => {
+    for (const input of [
+        '#jm资料1257267', '#jm资料 1257267', '#jm资料JM1257267', '#jm资料 JM1257267'
+    ]) {
+        const match = input.match(jmCommandPatterns.info);
+        assert.ok(match, input);
+        assert.equal(parseJmId(match[1]), '1257267', input);
+    }
+
+    for (const input of ['#jm查1257267', '#jm查 JM1257267']) {
+        const match = input.match(jmCommandPatterns.album);
+        assert.ok(match, input);
+        assert.equal(parseJmId(match[1]), '1257267', input);
+    }
+
+    for (const input of ['#jm查章1257267 2', '#jm查章JM1257267 2', '#jm查章 JM1257267 2']) {
+        const match = input.match(jmCommandPatterns.chapter);
+        assert.ok(match, input);
+        assert.deepEqual(parseJmChapterArgs(match[1]), { jmId: '1257267', chapter: 2, valid: true }, input);
+    }
+
+    for (const input of ['#jm评论1257267', '#jm评论JM1257267 2', '#jm评论 JM1257267 2']) {
+        const match = input.match(jmCommandPatterns.comments);
+        assert.ok(match, input);
+        const args = parseJmIdAndPage(match[1]);
+        assert.equal(args.jmId, '1257267', input);
+        assert.equal(args.page, input.includes(' 2') ? 2 : 1, input);
+        assert.equal(args.valid, true, input);
+    }
+
+    for (const input of ['#jm资料', '#jm查章']) {
+        const pattern = input === '#jm资料' ? jmCommandPatterns.info : jmCommandPatterns.chapter;
+        const match = input.match(pattern);
+        assert.ok(match, input);
+        assert.equal(input === '#jm资料' ? parseJmId(match[1]) : parseJmChapterArgs(match[1]).valid, input === '#jm资料' ? null : false);
+    }
+});
+
+test('search and tag commands preserve complete terms with optional separators', () => {
+    for (const [pattern, input, expected] of [
+        [jmCommandPatterns.search, '#jm搜无修正 2', { term: '无修正', page: 2, valid: true }],
+        [jmCommandPatterns.search, '#jm搜 无修正 2', { term: '无修正', page: 2, valid: true }],
+        [jmCommandPatterns.tag, '#jm标签中文 3', { term: '中文', page: 3, valid: true }],
+        [jmCommandPatterns.tag, '#jm标签 中文 3', { term: '中文', page: 3, valid: true }]
+    ]) {
+        const match = input.match(pattern);
+        assert.ok(match, input);
+        assert.deepEqual(parseTermAndPage(match[1]), expected, input);
+    }
+});
+
+test('ranking and category patterns capture compact and spaced help arguments', () => {
+    for (const [input, pattern, parser, expected] of [
+        ['#jm排行周', jmCommandPatterns.ranking, parseRankingArgs, { period: '周', category: '全部', page: 1 }],
+        ['#jm排行 周', jmCommandPatterns.ranking, parseRankingArgs, { period: '周', category: '全部', page: 1 }],
+        ['#jm分类同人', jmCommandPatterns.category, parseCategoryArgs, { category: '同人', order: '最新', time: '全部', page: 1 }],
+        ['#jm分类 同人', jmCommandPatterns.category, parseCategoryArgs, { category: '同人', order: '最新', time: '全部', page: 1 }],
+        ['#jm排行帮助', jmCommandPatterns.ranking, parseRankingArgs, { help: true }],
+        ['#jm排行 帮助', jmCommandPatterns.ranking, parseRankingArgs, { help: true }],
+        ['#jm分类帮助', jmCommandPatterns.category, parseCategoryArgs, { help: true }],
+        ['#jm分类 帮助', jmCommandPatterns.category, parseCategoryArgs, { help: true }]
+    ]) {
+        const match = input.match(pattern);
+        assert.ok(match, input);
+        assert.deepEqual(parser(match[1]), expected, input);
+    }
+});
+
+test('file, page, login, and API URL commands capture compact arguments', () => {
+    for (const input of ['#jm压缩包123456', '#jm长图123456']) {
+        const pattern = input.startsWith('#jm压缩包') ? jmCommandPatterns.zip : jmCommandPatterns.longImage;
+        const match = input.match(pattern);
+        assert.ok(match, input);
+        assert.equal(parseJmId(match[1]), '123456', input);
+    }
+
+    for (const input of ['#jm图页JM123456 20', '#jm图页 123456']) {
+        const match = input.match(jmCommandPatterns.pages);
+        assert.ok(match, input);
+        const args = parseJmIdAndPage(match[1]);
+        assert.equal(args.jmId, '123456', input);
+        assert.equal(args.page, input.endsWith('20') ? 20 : 1, input);
+    }
+
+    for (const input of ['#jm登录user pass', '#jm登录 user pass']) {
+        const match = input.match(jmCommandPatterns.login);
+        assert.ok(match, input);
+        assert.deepEqual(match[1].trim().split(/\s+/u), ['user', 'pass'], input);
+    }
+
+    for (const input of ['#jm收藏夹2', '#jm收藏夹 2']) {
+        const match = input.match(jmCommandPatterns.favorites);
+        assert.ok(match, input);
+        assert.deepEqual(parsePageOnly(match[1]), { page: 2, valid: true }, input);
+    }
+    for (const input of ['#jm收藏123', '#jm收藏 JM123']) {
+        const match = input.match(jmCommandPatterns.favorite);
+        assert.ok(match, input);
+        assert.equal(parseJmId(match[1]), '123', input);
+    }
+    for (const input of ['#jm取消收藏123', '#jm点赞状态123']) {
+        const pattern = input.startsWith('#jm取消收藏') ? jmCommandPatterns.unfavorite : jmCommandPatterns.likeStatus;
+        const match = input.match(pattern);
+        assert.ok(match, input);
+        assert.equal(parseJmId(match[1]), '123', input);
+    }
+
+    for (const input of ['#jm设置api地址http://127.0.0.1:8000', '#jm设置api地址 http://127.0.0.1:8000']) {
+        const match = input.match(jmCommandPatterns.apiUrl);
+        assert.ok(match, input);
+        assert.equal(match[1], 'http://127.0.0.1:8000', input);
+    }
 });
 
 test('help command pattern is case-insensitive and matches only the complete command', () => {
@@ -82,9 +210,13 @@ test('help command pattern is case-insensitive and matches only the complete com
 
     for (const input of [
         '#jm查',
+        '#jm帮助参数',
+        '#jmhelp 参数',
         '#jm查 JM123',
         '#jm查章 JM123 2',
+        '#jm排行帮助',
         '#jm排行 帮助',
+        '#jm分类帮助',
         '#jm分类 帮助',
         '#jm搜 无修正',
         '#jm资料 JM123',
@@ -107,7 +239,8 @@ test('help text lists public and owner-only commands with access notes', () => {
     assert.match(message, /主人指令（仅主人可用）/);
     assert.match(message, /#jm登录 \[账号 密码\].*仅私聊/);
     assert.match(message, /无参数时查看状态/);
-    assert.match(message, /#jm资料 <车号>.*车号前需要空格/);
+    assert.match(message, /指令和参数之间可加空格，也可不加/);
+    assert.doesNotMatch(message, /车号前需要空格/);
     assert.match(message, /#jm排行 帮助/);
     assert.match(message, /#jm分类 帮助/);
 });
