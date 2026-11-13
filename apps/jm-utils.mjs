@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 
 export const jmCommandPatterns = Object.freeze({
+    help: /^#jm(?:帮助|help)\s*$/i,
     album: /^#jm查(?!章)(.*)$/i,
     chapter: /^#jm查章(?:\s+(.*))?\s*$/i,
     search: /^#jm搜\s*(.*?)\s*$/,
@@ -15,6 +16,38 @@ export const jmCommandPatterns = Object.freeze({
     longImage: /^#jm长图(?:\s+(.*))?\s*$/i,
     pages: /^#jm图页(?:\s+(.*))?\s*$/i
 });
+
+export function buildJmHelpText() {
+    return [
+        'JM 指令帮助（也可发送 #jmhelp）',
+        '',
+        '【公共指令】',
+        '#jm查 <车号>：下载整本 PDF，例如 #jm查 JM123456（可无空格）',
+        '#jm查章 <车号> <章节序号>：下载指定章节，例如 #jm查章 JM123456 2',
+        '#jm搜 <关键词> [页码]：站内搜索，例如 #jm搜 无修正 2',
+        '#jm标签 <标签> [页码]：按标签搜索，例如 #jm标签 中文 3',
+        '#jm资料 <车号>：查看资料，例如 #jm资料 JM123456（车号前需要空格）',
+        '#jm评论 <车号> [页码]：查看评论，例如 #jm评论 JM123456 2',
+        '#jm排行 [日|周|月] [分类] [页码]：默认周榜；发送 #jm排行 帮助 查看参数',
+        '#jm分类 [分类] [排序] [时间] [页码]：发送 #jm分类 帮助 查看参数',
+        '#jm压缩包 <车号>：下载整本 ZIP',
+        '#jm长图 <车号>：生成长图，超限请改用 PDF',
+        '#jm图页 <车号> [页数上限]：发送页图，默认前 20 页',
+        '',
+        '【主人指令（仅主人可用）】',
+        '#jm登录 [账号 密码]：仅私聊；无参数时查看状态',
+        '#jm收藏夹 [页码]：查看收藏夹',
+        '#jm收藏 <车号>：收藏本子',
+        '#jm取消收藏 <车号>：取消收藏',
+        '#jm点赞状态 <车号>：查看点赞和收藏状态',
+        '#jm启动api、#jm重启api：启动或重启 API',
+        '#jm检查api：检查 API 状态',
+        '#jm定时检查：开启定时巡检',
+        '#jm安装依赖：安装 Python 依赖',
+        '#jm路径写入：写入运行环境配置',
+        '#jm设置api地址 <地址>：设置 API 地址'
+    ].join('\n');
+}
 
 export function parseJmId(raw) {
     const normalized = String(raw ?? '').replace(/\s+/gu, '').replace(/^jm/i, '');

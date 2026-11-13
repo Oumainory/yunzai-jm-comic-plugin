@@ -5,6 +5,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { jmApi } from './apiget.js';
 import {
+    buildJmHelpText,
     formatComments,
     formatListPage,
     jmCommandPatterns,
@@ -244,6 +245,7 @@ async function sendFile(e, filePath, fileName, context, includeCover = false, pa
 export class ejmFeatures extends plugin {
     constructor() {
         const rules = [
+            { reg: jmCommandPatterns.help, fnc: 'help' },
             { reg: jmCommandPatterns.chapter, fnc: 'chapter' },
             { reg: jmCommandPatterns.unfavorite, fnc: 'unfavorite', permission: 'master' },
             { reg: jmCommandPatterns.likeStatus, fnc: 'likeStatus', permission: 'master' },
@@ -262,6 +264,10 @@ export class ejmFeatures extends plugin {
         ];
         rules.sort((left, right) => right.reg.source.length - left.reg.source.length);
         super({ name: 'ejmFeatures', dsc: 'JM 搜索与资料功能', event: 'message', priority: 1, rule: rules });
+    }
+
+    async help(e) {
+        return safeReply(e, buildJmHelpText());
     }
 
     async search(e) {

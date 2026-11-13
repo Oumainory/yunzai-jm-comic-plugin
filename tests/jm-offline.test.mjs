@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
     fileToBase64Url,
+    buildJmHelpText,
     formatComments,
     formatListPage,
     jmCommandPatterns,
@@ -72,6 +73,43 @@ test('chapter parser and command patterns keep specific commands separate', () =
     assert.equal(jmCommandPatterns.favorites.test('#jm收藏夹 2'), true);
     assert.equal(jmCommandPatterns.favorite.test('#jm收藏夹 2'), false);
     assert.equal(jmCommandPatterns.favorite.test('#jm收藏 JM123'), true);
+});
+
+test('help command pattern is case-insensitive and matches only the complete command', () => {
+    for (const input of ['#jm帮助', '#jmhelp', '#JMHELP', '#jm帮助   ']) {
+        assert.equal(jmCommandPatterns.help.test(input), true, input);
+    }
+
+    for (const input of [
+        '#jm查',
+        '#jm查 JM123',
+        '#jm查章 JM123 2',
+        '#jm排行 帮助',
+        '#jm分类 帮助',
+        '#jm搜 无修正',
+        '#jm资料 JM123',
+        '#jm收藏夹 2'
+    ]) {
+        assert.equal(jmCommandPatterns.help.test(input), false, input);
+    }
+});
+
+test('help text lists public and owner-only commands with access notes', () => {
+    const message = buildJmHelpText();
+    for (const command of [
+        '#jm查', '#jm查章', '#jm搜', '#jm标签', '#jm资料', '#jm评论', '#jm排行', '#jm分类',
+        '#jm压缩包', '#jm长图', '#jm图页', '#jm登录', '#jm收藏夹', '#jm收藏', '#jm取消收藏',
+        '#jm点赞状态', '#jm启动api', '#jm重启api', '#jm检查api', '#jm定时检查', '#jm安装依赖',
+        '#jm路径写入', '#jm设置api地址'
+    ]) {
+        assert.ok(message.includes(command), command);
+    }
+    assert.match(message, /主人指令（仅主人可用）/);
+    assert.match(message, /#jm登录 \[账号 密码\].*仅私聊/);
+    assert.match(message, /无参数时查看状态/);
+    assert.match(message, /#jm资料 <车号>.*车号前需要空格/);
+    assert.match(message, /#jm排行 帮助/);
+    assert.match(message, /#jm分类 帮助/);
 });
 
 test('sanitizeSendError removes base64 file contents', () => {
