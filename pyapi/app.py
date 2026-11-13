@@ -23,6 +23,7 @@ try:
     from dotenv import load_dotenv
     from PIL import Image # 启用 PIL 以支持 WebP 转换
     from cover_preview import create_cover_preview
+    from feature_api import FeatureApi, list_album_images, parse_feature_id
 except ImportError as e:
     print(f"\n[Error] 缺少必要依赖: {e.name}")
     print("请手动运行安装命令:")
@@ -93,6 +94,7 @@ if not os.path.exists(target_option_path):
 
 EXCLUDE_FOLDER = os.getenv('JM_EXCLUDE_FOLDER', 'long')
 EXCLUDE_FOLDER_PDF = os.getenv('JM_EXCLUDE_FOLDER_PDF', 'pdf')
+EXCLUDE_FOLDER_ZIP = 'zip'
 FLASK_HOST = os.getenv('FLASK_HOST', '127.0.0.1')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '8000'))
 JM_LOG_DIR = os.getenv('JM_LOG_DIR')
@@ -101,6 +103,7 @@ MEMORY_THRESHOLD = float(os.getenv('MEMORY_THRESHOLD', '80.0'))  # 内存使用�
 # 推导路径
 IMAGE_FOLDER = os.path.join(JM_BASE_DIR, 'long')
 PDF_FOLDER = os.path.join(JM_BASE_DIR, 'pdf')
+ZIP_FOLDER = os.path.join(JM_BASE_DIR, 'zip')
 OPTION_YML_PATH = os.path.join(JM_LOG_DIR if JM_LOG_DIR else JM_BASE_DIR, 'option.yml')
 
 # 内存监控状态
@@ -171,7 +174,7 @@ def cleanup_folders():
 
     for item in os.listdir(JM_BASE_DIR):
         item_path = os.path.join(JM_BASE_DIR, item)
-        if os.path.isdir(item_path) and item not in [EXCLUDE_FOLDER, EXCLUDE_FOLDER_PDF]:
+        if os.path.isdir(item_path) and item not in [EXCLUDE_FOLDER, EXCLUDE_FOLDER_PDF, EXCLUDE_FOLDER_ZIP]:
             try:
                 shutil.rmtree(item_path)
                 logging.info(f"已删除: {item_path}")
@@ -200,31 +203,15 @@ def download_album(jm_id):
             return False
 
 # 手动合成 PDF 函数
-def generate_pdf_manually(jm_id):
-    """手动合成 PDF"""
+def generate_pdf_from_images(images, pdf_output_path):
+    """从明确给定的图片集合合成 PDF。"""
     import io
     try:
-        album_dir = os.path.join(IMAGE_FOLDER, str(jm_id))
-        if not os.path.exists(album_dir):
-            logging.error(f"PDF合成失败: 图片目录不存在 {album_dir}")
-            return False
-
-        # 获取所有图片文件并排序
-        images = []
-        for root, _, files in os.walk(album_dir):
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                    images.append(os.path.join(root, file))
-        
-        # 简单的排序，可能需要根据实际文件名格式调整
-        images.sort()
-
         if not images:
-            logging.error(f"PDF合成失败: 目录为空 {album_dir}")
+            logging.error("PDF合成失败: 图片列表为空")
             return False
 
-        pdf_output_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
-        os.makedirs(PDF_FOLDER, exist_ok=True)
+        os.makedirs(os.path.dirname(os.path.abspath(pdf_output_path)), exist_ok=True)
 
         # 转换 WebP 或其他不兼容格式为 PDF 字节流
         # img2pdf 不直接支持 WebP，需要先转换
@@ -232,10 +219,11 @@ def generate_pdf_manually(jm_id):
         
         try:
             for img_path in images:
-                if img_path.lower().endswith('.webp'):
-                    # 将 WebP 转换为 JPEG 字节流
+                if img_path.lower().endswith(('.webp', '.gif')):
+                    # 将 WebP 或 GIF 转换为 PDF 可用的 JPEG 字节流。
                     with Image.open(img_path) as img:
-                        if img.mode == 'RGBA':
+                        img.seek(0)
+                        if img.mode != 'RGB':
                             img = img.convert('RGB')
                         
                         # 保存到内存 buffer
@@ -258,6 +246,20 @@ def generate_pdf_manually(jm_id):
     except Exception as e:
         logging.error(f"手动合成 PDF 异常: {str(e)}")
         return False
+
+
+def generate_pdf_manually(jm_id):
+    """手动合成整本 PDF，忽略隔离保存的章节目录。"""
+    album_dir = os.path.join(IMAGE_FOLDER, str(jm_id))
+    if not os.path.isdir(album_dir):
+        logging.error(f"PDF合成失败: 图片目录不存在 {album_dir}")
+        return False
+    images = album_images(album_dir)
+    if not images:
+        logging.error(f"PDF合成失败: 目录为空 {album_dir}")
+        return False
+    pdf_output_path = os.path.join(PDF_FOLDER, f"{jm_id}.pdf")
+    return generate_pdf_from_images(images, pdf_output_path)
 
 # 内存监控函数
 def memory_monitor():
@@ -366,30 +368,11 @@ def health():
 
 
 def parse_album_id():
-    raw_jm_id = request.args.get('jm', '')
-    normalized = ''.join(raw_jm_id.split())
-    if normalized[:2].lower() == 'jm':
-        normalized = normalized[2:]
-    if not normalized.isascii() or not normalized.isdigit():
-        return None
-    try:
-        jm_id = int(normalized)
-    except ValueError:
-        return None
-    return jm_id if jm_id > 0 else None
+    return parse_feature_id(request.args.get('jm', ''))
 
 
 def album_images(album_dir):
-    supported_extensions = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
-    images = []
-    if not os.path.isdir(album_dir):
-        return images
-    for root, dirs, files in os.walk(album_dir):
-        dirs.sort()
-        for filename in sorted(files):
-            if filename.lower().endswith(supported_extensions):
-                images.append(os.path.abspath(os.path.join(root, filename)))
-    return images
+    return list_album_images(album_dir)
 
 
 @app.route('/album', methods=['GET'])
@@ -435,6 +418,19 @@ def get_album():
     except Exception as e:
         logging.exception(f"处理专辑 {jm_id} 失败")
         return jsonify({'ok': False, 'error': f'处理专辑时发生错误：{e}', 'code': 500}), 500
+
+
+FEATURE_API = FeatureApi(
+    app=app,
+    get_option=get_jm_option,
+    image_folder=IMAGE_FOLDER,
+    pdf_folder=PDF_FOLDER,
+    zip_folder=ZIP_FOLDER,
+    download_album=download_album,
+    pdf_builder=generate_pdf_from_images,
+    auth_path=os.path.join(CURRENT_DIR, '..', 'config', 'jm-auth.json')
+)
+FEATURE_API.register_routes()
 
 
 # 路由处理
@@ -581,6 +577,8 @@ if __name__ == '__main__':
         logging.info(f"域名更新完成。当前可用 API 域名: {JmModuleConfig.DOMAIN_API_LIST}")
     except Exception as e:
         logging.error(f"域名自动更新失败: {e}，将使用默认域名列表")
+
+    FEATURE_API.initialize_auth()
 
     logging.info("服务启动，执行首次清理...")
     cleanup_folders()

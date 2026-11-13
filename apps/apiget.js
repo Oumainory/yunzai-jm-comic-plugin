@@ -5,7 +5,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
 import fetch from 'node-fetch';
 import fs from 'node:fs';
-import { fileToBase64Url, parseJmId } from './jm-utils.mjs';
+import {
+    jmCommandPatterns,
+    parseJmId,
+    replyFailureReason,
+    sanitizeSendError,
+    uploadLocalFile
+} from './jm-utils.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pluginRoot = path.resolve(__dirname, '..');
@@ -59,51 +65,6 @@ function requestTimeoutMs() {
     return Number.isFinite(timeout) && timeout > 0 ? timeout : DEFAULT_CONFIG.request_timeout_ms;
 }
 
-function sanitizeSendError(value) {
-    const message = String(value?.message || value || '').replace(/base64:\/\/\S+/gi, 'base64://[内容已隐藏]');
-    if (/delivery was not confirmed|no message receipt/i.test(message)) {
-        return 'QQ 未确认消息送达（未返回消息回执）';
-    }
-    if (/retcode\s*[:=]?\s*100/i.test(message)) return 'QQ 返回 retcode 100，未确认消息送达';
-    if (/EACCES|permission denied/i.test(message)) return '本地文件访问被拒绝（EACCES）';
-    return (message.trim() || '未知错误').slice(0, 300);
-}
-
-function hasMessageId(value, visited = new Set()) {
-    if (!value || typeof value !== 'object' || visited.has(value)) return false;
-    visited.add(value);
-    if (Array.isArray(value)) return value.some(item => hasMessageId(item, visited));
-    if (value.message_id !== undefined && value.message_id !== null && value.message_id !== '') {
-        return Array.isArray(value.message_id) ? value.message_id.length > 0 : true;
-    }
-    return Object.values(value).some(item => hasMessageId(item, visited));
-}
-
-function replyFailureReason(result) {
-    if (result === false || result === null || result === undefined) return '平台未返回消息回执';
-    if (typeof result === 'string') {
-        if (/delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100/i.test(result)) {
-            return sanitizeSendError(result);
-        }
-        return '平台未返回 message_id，无法确认消息已送达';
-    }
-    if (typeof result === 'object') {
-        const retcode = Number(result.retcode);
-        if (Number.isFinite(retcode) && ![0, 1].includes(retcode)) {
-            return sanitizeSendError(`retcode ${retcode}: ${result.msg || result.wording || ''}`);
-        }
-        if (result.ok === false || /^(failed|error)$/i.test(String(result.status || ''))) {
-            return sanitizeSendError(result.error || result.msg || result.wording || result.status);
-        }
-        if (hasMessageId(result)) return null;
-        const detail = result.error || result.msg || result.wording || result.message;
-        if (detail && /delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100/i.test(String(detail))) {
-            return sanitizeSendError(detail);
-        }
-    }
-    return '平台未返回 message_id，无法确认消息已送达';
-}
-
 async function safeReply(e, message) {
     try {
         const result = await e.reply(message);
@@ -150,28 +111,11 @@ function ensureCoverPreview(result, jmId, pdfPath, coverPath) {
     return outputPath;
 }
 
-function assertFileUploadSucceeded(result) {
-    if (result === false || result === null || result === undefined) {
-        throw new Error('OneBot 未返回文件上传结果');
-    }
-    if (typeof result === 'object') {
-        const retcode = Number(result.retcode);
-        if (Number.isFinite(retcode) && ![0, 1].includes(retcode)) {
-            throw new Error(`retcode ${retcode}: ${result.msg || result.wording || ''}`);
-        }
-        if (result.ok === false || /^(failed|error)$/i.test(String(result.status || ''))) {
-            throw new Error(result.error || result.msg || result.wording || 'OneBot 返回上传失败');
-        }
-    } else if (typeof result === 'string' && /failed|error|retcode\s*[:=]?\s*100/i.test(result)) {
-        throw new Error(result);
-    }
-}
-
-async function fetchWithTimeout(url, timeoutMs) {
+async function fetchWithTimeout(url, timeoutMs, options = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        return await fetch(url, { signal: controller.signal });
+        return await fetch(url, { ...options, signal: controller.signal });
     } finally {
         clearTimeout(timer);
     }
@@ -462,7 +406,7 @@ function startHealthTimer() {
     return true;
 }
 
-const jm = /^#jm查(.*)$/;
+const jm = jmCommandPatterns.album;
 const Apirun = /^#jm(启动|重启)api$/;
 const Apitimerestart = /^#jm定时检查$/;
 const Apirestart = /^#jm检查api$/;
@@ -576,7 +520,7 @@ export class ejm extends plugin {
         } catch (error) {
             logger.error(`[jm] 发送封面转发失败: ${sanitizeSendError(error)}`);
             const reason = sanitizeSendError(error);
-            const blocked = error.replyFailure || /delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100|未返回 message_id/i.test(String(error.message));
+            const blocked = error.replyFailure || /delivery was not confirmed|no message receipt|retcode\s*[:=]?\s*100|未返回 message_id|未返回消息回执|未确认消息送达/i.test(String(error.message));
             const status = blocked ? `封面被拦截，QQ 未确认收到` : `封面发送失败`;
             await safeReply(e, `车号 ${jmId}，共 ${pageCount} 页。${status}：${reason}。正在继续处理 PDF。`);
         }
@@ -605,20 +549,7 @@ export class ejm extends plugin {
         }
 
         try {
-            const file = await fileToBase64Url(pdfPath);
-            let action;
-            let params;
-            if (e.group_id) {
-                action = 'upload_group_file';
-                params = { group_id: e.group_id, file, name: `${jmId}.pdf` };
-            } else if (e.user_id) {
-                action = 'upload_private_file';
-                params = { user_id: e.user_id, file, name: `${jmId}.pdf` };
-            } else {
-                throw new Error('无法识别当前群聊或私聊对象');
-            }
-            const uploadResult = await e.bot.sendApi(action, params);
-            assertFileUploadSucceeded(uploadResult);
+            await uploadLocalFile(e, pdfPath, `${jmId}.pdf`);
             await safeReply(e, `车号 ${jmId}：${coverStatus}，PDF 已上传。`);
         } catch (error) {
             logger.error(`[jm] 发送车号 ${jmId} PDF 失败: ${sanitizeSendError(error)}`);
@@ -653,6 +584,20 @@ export class ejm extends plugin {
         return checkTask(e);
     }
 }
+
+function maxPdfMb() {
+    const configured = Number(CONFIG.max_pdf_mb);
+    return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_CONFIG.max_pdf_mb;
+}
+
+export const jmApi = Object.freeze({
+    apiBase,
+    ensureApiRunning,
+    fetchWithTimeout,
+    maxPdfMb,
+    requestTimeoutMs,
+    safeReply
+});
 
 if (CONFIG.auto_check === true) startHealthTimer();
 if (CONFIG.auto_start !== false) {
