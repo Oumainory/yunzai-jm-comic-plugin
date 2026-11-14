@@ -10,6 +10,7 @@ import {
     parseJmId,
     replyFailureReason,
     sanitizeSendError,
+    summarizeJmError,
     uploadLocalFile
 } from './jm-utils.mjs';
 
@@ -105,7 +106,9 @@ function ensureCoverPreview(result, jmId, pdfPath, coverPath) {
     try {
         execFileSync(command, [coverPreviewScript, coverPath, outputPath], { encoding: 'utf8' });
     } catch (error) {
-        throw new Error(error.stderr?.trim() || error.message);
+        const details = [error.stdout, error.stderr, error.message, error.stack].filter(Boolean).join('\n').trim();
+        logger.error(`[jm] 生成封面预览失败：${details}`);
+        throw new Error(summarizeJmError(error.stderr || error.message));
     }
     if (!fs.existsSync(outputPath)) throw new Error('Python 未生成封面预览图');
     return outputPath;
@@ -489,7 +492,9 @@ export class ejm extends plugin {
         }
 
         if (!response.ok || result?.ok !== true) {
-            const errorText = result?.error || '后端未提供错误信息';
+            const rawError = result?.error || '后端未提供错误信息';
+            if (result?.error) logger.error(`[jm] /album 返回错误（HTTP ${response.status}）：${result.error}`);
+            const errorText = summarizeJmError(rawError);
             if (response.status === 400) return safeReply(e, `车号参数无效：${errorText}`);
             if (response.status === 404) return safeReply(e, `未找到车号 ${jmId} 的资源：${errorText}`);
             if (response.status === 503) return safeReply(e, `车号 ${jmId} 获取失败，后端暂时不可用：${errorText}。请稍后重试。`);

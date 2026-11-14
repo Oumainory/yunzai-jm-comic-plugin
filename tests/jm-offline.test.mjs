@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
     fileToBase64Url,
     buildJmHelpText,
+    buildRequirementInstallReply,
     formatComments,
     formatListPage,
     jmCommandPatterns,
@@ -20,6 +21,7 @@ import {
     assertFileUploadSucceeded,
     replyFailureReason,
     sanitizeSendError,
+    summarizeJmError,
     uploadLocalFile
 } from '../apps/jm-utils.mjs';
 
@@ -250,6 +252,44 @@ test('sanitizeSendError removes base64 file contents', () => {
     const message = sanitizeSendError(`upload rejected: ${secretPayload}`);
     assert.ok(message.includes('base64://[内容已隐藏]'));
     assert.ok(!message.includes('YWJjZGVm'));
+
+    const credentials = sanitizeSendError('账号：secret-user 密码：secret-password');
+    assert.ok(!credentials.includes('secret-user'));
+    assert.ok(!credentials.includes('secret-password'));
+});
+
+test('dependency install replies never include process output', () => {
+    const logs = [
+        'Requirement already satisfied: requests',
+        'Traceback (most recent call last):',
+        'cookie: session=secret-cookie',
+        'access_token=secret-token',
+        'base64://YWJjZGVmZ2hpamtsbW5vcA=='
+    ].join('\n');
+    const successReply = buildRequirementInstallReply({ success: true, stdout: logs, stderr: logs });
+    const failureReply = buildRequirementInstallReply({ success: false, code: 1, stdout: logs, stderr: logs, message: logs });
+
+    assert.equal(successReply, '虚拟环境依赖安装成功。');
+    assert.match(failureReply, /虚拟环境依赖安装失败.*退出码 1/);
+    assert.match(failureReply, /服务器 Yunzai 日志/);
+    for (const reply of [successReply, failureReply]) {
+        assert.doesNotMatch(reply, /Requirement already satisfied|Traceback|secret-cookie|secret-token|YWJjZGVm/);
+    }
+});
+
+test('error summaries redact credentials, cookies, tokens, base64 and traceback bodies', () => {
+    const secretText = [
+        'Traceback (most recent call last):',
+        '  File "app.py", line 12, in request',
+        'RuntimeError: account=secret-user password="secret password" cookie: session=secret-cookie token=secret-token base64://YWJjZGVm'
+    ].join('\n');
+    const summary = summarizeJmError(secretText);
+
+    assert.ok(summary.startsWith('RuntimeError:'));
+    for (const secret of ['secret-user', 'secret password', 'secret-cookie', 'secret-token', 'YWJjZGVm']) {
+        assert.ok(!summary.includes(secret), secret);
+    }
+    assert.ok(summary.length <= 180);
 });
 
 test('reply receipt detection accepts message IDs and rejects missing receipts', () => {

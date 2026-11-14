@@ -243,14 +243,44 @@ export function formatComments(comments, { page = 1, pageCount = null, total = n
     return lines.join('\n');
 }
 
+export function buildRequirementInstallReply({ success, code } = {}) {
+    if (success) return '虚拟环境依赖安装成功。';
+
+    const codeText = Number.isInteger(code)
+        ? `退出码 ${code}`
+        : /^[A-Z][A-Z0-9_]{0,30}$/.test(String(code || ''))
+            ? `错误码 ${code}`
+            : '退出码未知';
+    return `虚拟环境依赖安装失败（${codeText}）。详细日志请查看服务器 Yunzai 日志。`;
+}
+
+function redactSensitiveText(value) {
+    return String(value ?? '')
+        .replace(/base64:\/\/[^\s"'<>]+/gi, 'base64://[内容已隐藏]')
+        .replace(/\b(cookie|set-cookie|authorization)\b(\s*[:=]\s*)([^\r\n]*)/gi, '$1$2[内容已隐藏]')
+        .replace(/(?:\b(username|user|account|password|passwd|pwd|token|access[_-]?token|refresh[_-]?token|api[_-]?key|secret)\b|(账号|用户名|密码|令牌|访问令牌|刷新令牌))(\s*["']?\s*[:=：]\s*["']?)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, (_match, englishKey, chineseKey, separator) => `${englishKey || chineseKey}${separator}[内容已隐藏]`)
+        .replace(/(https?:\/\/)[^/@\s]+:[^/@\s]+@/gi, '$1[账号信息已隐藏]@');
+}
+
 export function sanitizeSendError(value) {
-    const message = String(value?.message || value || '').replace(/base64:\/\/\S+/gi, 'base64://[内容已隐藏]');
+    const message = redactSensitiveText(value?.message || value || '');
     if (/delivery was not confirmed|no message receipt/i.test(message)) {
         return 'QQ 未确认消息送达（未返回消息回执）';
     }
     if (/retcode\s*[:=]?\s*100/i.test(message)) return 'QQ 返回 retcode 100，未确认消息送达';
     if (/EACCES|permission denied/i.test(message)) return '本地文件访问被拒绝（EACCES）';
     return (message.trim() || '未知错误').slice(0, 300);
+}
+
+export function summarizeJmError(value, maxLength = 180) {
+    const lines = redactSensitiveText(value?.message || value || '')
+        .split(/\r?\n/u)
+        .map(line => line.trim())
+        .filter(Boolean);
+    const summary = [...lines].reverse().find(line => !/^(?:traceback\b|file ["']|during handling|the above exception|at .+:\d+:\d+)/i.test(line));
+    const text = summary || '请求失败';
+    const limit = Number.isInteger(maxLength) && maxLength > 0 ? maxLength : 180;
+    return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
 function hasMessageId(value, visited = new Set()) {

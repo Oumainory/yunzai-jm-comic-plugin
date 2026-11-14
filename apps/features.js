@@ -21,6 +21,7 @@ import {
     parseTermAndPage,
     replyFailureReason,
     sanitizeSendError,
+    summarizeJmError,
     uploadLocalFile
 } from './jm-utils.mjs';
 
@@ -97,7 +98,9 @@ async function requestJson(e, route, { query = {}, method = 'GET', body = null, 
             throw new ApiError(`API 返回了无法识别的数据（HTTP ${response.status}）`, response.status);
         }
         if (!response.ok || result?.ok !== true) {
-            throw new ApiError(result?.error || `请求失败（HTTP ${response.status}）`, response.status, result);
+            const detail = result?.error || `请求失败（HTTP ${response.status}）`;
+            if (result?.error) logger.error(`[jm] API ${route} 返回错误（HTTP ${response.status}）：${result.error}`);
+            throw new ApiError(summarizeJmError(detail), response.status, result);
         }
         return result;
     } catch (error) {
@@ -109,7 +112,7 @@ async function requestJson(e, route, { query = {}, method = 'GET', body = null, 
 
 function failureText(error) {
     if (error.status === 401) return '未登录，请私聊主人发送 #jm登录 账号 密码';
-    return `获取失败：${sanitizeSendError(error)}`;
+    return `获取失败：${summarizeJmError(error)}`;
 }
 
 async function loadList(e, route, query, command, title) {

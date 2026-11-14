@@ -5,6 +5,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import plugin from '../../../lib/plugins/plugin.js';
+import { buildRequirementInstallReply } from './jm-utils.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -78,11 +79,11 @@ export class ejmEnv extends plugin {
             });
             const output = [result.stdout, result.stderr].filter(Boolean).join('\n').trim();
             logger.info(`[jm] 虚拟环境依赖安装完成${output ? `：\n${output}` : ''}`);
-            return e.reply(`虚拟环境依赖安装成功。\n${truncateOutput(output || 'pip install 已成功退出。')}`);
+            return e.reply(buildRequirementInstallReply({ success: true, ...result }));
         } catch (error) {
-            const output = [error.stdout, error.stderr, error.message].filter(Boolean).join('\n').trim();
+            const output = [error.stdout, error.stderr, error.message, error.stack].filter(Boolean).join('\n').trim();
             logger.error(`[jm] 虚拟环境依赖安装失败：${output}`);
-            return e.reply(`虚拟环境依赖安装失败（退出码 ${error.code ?? '未知'}）。\n${truncateOutput(output)}`);
+            return e.reply(buildRequirementInstallReply({ success: false, code: error.code }));
         }
     }
 }
@@ -103,10 +104,4 @@ function updateEnvVariable(key, newValue, filePath) {
     }
 
     fs.writeFileSync(filePath, `${lines.join(os.EOL)}${os.EOL}`, 'utf8');
-}
-
-function truncateOutput(output, limit = 3500) {
-    const text = String(output || '').trim();
-    if (text.length <= limit) return text;
-    return `……（日志过长，以下为末尾 ${limit} 字符）……\n${text.slice(-limit)}`;
 }
